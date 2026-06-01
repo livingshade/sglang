@@ -123,6 +123,8 @@ from sglang.srt.managers.io_struct import (
     LoadLoRAAdapterFromTensorsReqOutput,
     LoadLoRAAdapterReqInput,
     LoadLoRAAdapterReqOutput,
+    OffloadHiCacheReqInput,
+    OffloadHiCacheReqOutput,
     OpenSessionReqInput,
     PauseGenerationReqInput,
     PinHiCacheReqInput,
@@ -1239,6 +1241,7 @@ class Scheduler(
                 (PinHiCacheReqInput, self.pin_hicache_wrapped),
                 (UnpinHiCacheReqInput, self.unpin_hicache_wrapped),
                 (ListPinnedHiCacheReqInput, self.list_pinned_hicache_wrapped),
+                (OffloadHiCacheReqInput, self.offload_hicache_wrapped),
                 (AbortReq, self.abort_request),
                 (OpenSessionReqInput, self.open_session),
                 (CloseSessionReqInput, self.close_session),
@@ -3189,6 +3192,14 @@ class Scheduler(
             )
         pinned_rids = self.tree_cache.list_pinned_requests()
         return ListPinnedHiCacheReqOutput(success=True, pinned_rids=pinned_rids)
+
+    def offload_hicache_wrapped(self, recv_req: OffloadHiCacheReqInput):
+        if not self.enable_hierarchical_cache:
+            return OffloadHiCacheReqOutput(
+                success=False, message="Hierarchical cache is not enabled."
+            )
+        success, message = self.tree_cache.offload_request(recv_req.rid)
+        return OffloadHiCacheReqOutput(success=success, message=message)
 
     def on_idle(self):
         """Idle housekeeping: guard, check, metrics, reset, sleep."""

@@ -1010,6 +1010,30 @@ async def list_pinned_hicache():
     return {"pinned_rids": ret.pinned_rids}
 
 
+# example usage:
+# curl -s -X POST http://127.0.0.1:30000/hicache/offload -H 'Content-Type: application/json' -d '{"rid": "request-id-here"}'
+@app.api_route("/hicache/offload", methods=["POST"])
+@auth_level(AuthLevel.ADMIN_OPTIONAL)
+async def offload_hicache_request(request: Request):
+    """Offload a request's KV cache from GPU to host (CPU) memory.
+
+    Ensures the KV cache is backed up to DRAM and marks the GPU-resident
+    blocks for priority eviction (evicted first when GPU memory is needed).
+    """
+    body = await request.json()
+    rid = body.get("rid")
+    if not rid:
+        return Response(
+            content="Missing 'rid' field in request body.\n",
+            status_code=400,
+        )
+    ret = await _global_state.tokenizer_manager.offload_hicache(rid=rid)
+    return Response(
+        content=ret.message + "\n",
+        status_code=200 if ret.success else 400,
+    )
+
+
 @app.api_route("/start_profile", methods=["GET", "POST"])
 @auth_level(AuthLevel.ADMIN_OPTIONAL)
 async def start_profile_async(obj: Optional[ProfileReqInput] = None):

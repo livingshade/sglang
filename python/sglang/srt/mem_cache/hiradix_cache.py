@@ -1116,6 +1116,105 @@ class HiRadixCache(RadixCache):
         """Return list of currently pinned request IDs."""
         return list(self._pinned_requests.keys())
 
+    def _walk_all_nodes(
+        self, token_ids: list, extra_key: Optional[str]
+    ) -> List[TreeNode]:
+        """Walk the radix tree for the given tokens and return all matched nodes."""
+        radix_key = RadixKey(
+            token_ids, extra_key, is_bigram=self.is_eagle
+        ).page_aligned(self.page_size)
+
+        if len(radix_key) == 0:
+            return []
+
+        node = self.root_node
+        child_key = radix_key.child_key(self.page_size)
+        nodes = []
+
+        while len(radix_key) > 0 and child_key in node.children:
+            child = node.children[child_key]
+            prefix_len = child.key.match(radix_key, page_size=self.page_size)
+            nodes.append(child)
+
+            if prefix_len < len(child.key):
+                break
+
+            node = child
+            radix_key = radix_key[prefix_len:]
+            if len(radix_key) > 0:
+                child_key = radix_key.child_key(self.page_size)
+
+        return nodes
+
+    def offload_request(self, rid: str) -> Tuple[bool, str]:
+        """Offload a request's KV cache from GPU to host (CPU) memory.
+
+        This does two things:
+        1. Ensures the KV cache is backed up to DRAM (if not already).
+        2. Marks the GPU-resident nodes for priority eviction so they are
+           evicted first when GPU memory is needed.
+
+        Returns (success, message).
+        """
+        # Look up token IDs from completed or pinned requests
+        if rid in self._completed_request_tokens:
+            token_ids, extra_key = self._completed_request_tokens[rid]
+        elif rid in self._pinned_requests:
+            token_ids, extra_key = self._pinned_requests[rid]
+        else:
+            return False, (
+                f"Request {rid} not found. Either the request ID is invalid, "
+                f"or it has expired from the completion buffer "
+                f"(max {self._MAX_COMPLETED_ENTRIES} entries)."
+            )
+
+        all_nodes = self._walk_all_nodes(token_ids, extra_key)
+        if not all_nodes:
+            return False, f"No cache nodes found for request {rid}."
+
+        backed_up = 0
+        already_backed_up = 0
+        marked_for_eviction = 0
+        already_evicted = 0
+
+        for node in all_nodes:
+            if node.evicted:
+                # Already evicted from GPU (lives on host only)
+                already_evicted += len(node.host_value) if node.backuped else 0
+                continue
+
+            # (1) Ensure backup to DRAM
+            if not node.backuped:
+                written = self.write_backup(node, write_back=True)
+                if written > 0:
+                    backed_up += written
+            else:
+                already_backed_up += len(node.host_value)
+
+            # (2) Mark for priority eviction: set access time to epoch
+            #     so it's evicted first under any time-based strategy
+            node.last_access_time = 0
+            node.hit_count = 0
+            node.creation_time = 0
+            marked_for_eviction += len(node.value) if node.value is not None else 0
+
+        # Flush any write-back operations we just triggered
+        if backed_up > 0:
+            self.writing_check(write_back=True)
+
+        parts = []
+        if backed_up > 0:
+            parts.append(f"backed up {backed_up} tokens to DRAM")
+        if already_backed_up > 0:
+            parts.append(f"{already_backed_up} tokens already on DRAM")
+        if marked_for_eviction > 0:
+            parts.append(f"marked {marked_for_eviction} GPU tokens for priority eviction")
+        if already_evicted > 0:
+            parts.append(f"{already_evicted} tokens already offloaded")
+        detail = "; ".join(parts) if parts else "no action needed"
+
+        return True, f"Offload for request {rid}: {detail}."
+
     def load_back(
         self, node: TreeNode, mem_quota: Optional[int] = None
     ) -> Optional[torch.Tensor]:

@@ -1398,6 +1398,19 @@ class ListPinnedHiCacheReqOutput(BaseReq):
 
 
 @dataclass
+class OffloadHiCacheReqInput(BaseReq):
+    """Offload a request's KV cache from GPU to host (CPU) memory."""
+
+    rid: str
+
+
+@dataclass
+class OffloadHiCacheReqOutput(BaseReq):
+    success: bool
+    message: str = ""
+
+
+@dataclass
 class PauseGenerationReqInput(BaseReq):
     """
     Note that the PauseGenerationRequests is only supported in SGLang Server.

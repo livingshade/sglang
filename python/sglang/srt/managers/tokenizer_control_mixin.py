@@ -56,6 +56,8 @@ from sglang.srt.managers.io_struct import (
     LoadLoRAAdapterReqInput,
     LoadLoRAAdapterReqOutput,
     LoRAUpdateOutput,
+    OffloadHiCacheReqInput,
+    OffloadHiCacheReqOutput,
     OpenSessionReqInput,
     PinHiCacheReqInput,
     PinHiCacheReqOutput,
@@ -123,6 +125,7 @@ _COMMUNICATOR_SPECS = [
     ("pin_hicache", PinHiCacheReqOutput),
     ("unpin_hicache", UnpinHiCacheReqOutput),
     ("list_pinned_hicache", ListPinnedHiCacheReqOutput),
+    ("offload_hicache", OffloadHiCacheReqOutput),
     ("profile", ProfileReqOutput),
     ("get_internal_state", GetInternalStateReqOutput),
     ("set_internal_state", SetInternalStateReqOutput),
@@ -364,6 +367,17 @@ class TokenizerControlMixin:
         return ListPinnedHiCacheReqOutput(
             success=True, pinned_rids=sorted(all_rids)
         )
+
+    async def offload_hicache(
+        self: TokenizerManager, rid: str
+    ) -> OffloadHiCacheReqOutput:
+        """Offload a request's KV cache from GPU to host (CPU) memory."""
+        self.auto_create_handle_loop()
+        results = await self.offload_hicache_communicator(
+            OffloadHiCacheReqInput(rid=rid)
+        )
+        all_success, all_message = FanOutCommunicator.merge_results(results)
+        return OffloadHiCacheReqOutput(success=all_success, message=all_message)
 
     async def start_profile(
         self: TokenizerManager,
