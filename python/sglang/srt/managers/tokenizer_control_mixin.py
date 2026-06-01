@@ -49,12 +49,16 @@ from sglang.srt.managers.io_struct import (
     InitWeightsUpdateGroupReqOutput,
     ListExternalCorporaReqInput,
     ListExternalCorporaReqOutput,
+    ListPinnedHiCacheReqInput,
+    ListPinnedHiCacheReqOutput,
     LoadLoRAAdapterFromTensorsReqInput,
     LoadLoRAAdapterFromTensorsReqOutput,
     LoadLoRAAdapterReqInput,
     LoadLoRAAdapterReqOutput,
     LoRAUpdateOutput,
     OpenSessionReqInput,
+    PinHiCacheReqInput,
+    PinHiCacheReqOutput,
     ProfileReq,
     ProfileReqOutput,
     ProfileReqType,
@@ -72,6 +76,8 @@ from sglang.srt.managers.io_struct import (
     SlowDownReqOutput,
     UnloadLoRAAdapterReqInput,
     UnloadLoRAAdapterReqOutput,
+    UnpinHiCacheReqInput,
+    UnpinHiCacheReqOutput,
     UpdateWeightsFromDistributedReqInput,
     UpdateWeightsFromDistributedReqOutput,
     UpdateWeightsFromIPCReqInput,
@@ -114,6 +120,9 @@ _COMMUNICATOR_SPECS = [
     ("clear_hicache_storage", ClearHiCacheReqOutput),
     ("attach_hicache_storage", AttachHiCacheStorageReqOutput),
     ("detach_hicache_storage", DetachHiCacheStorageReqOutput),
+    ("pin_hicache", PinHiCacheReqOutput),
+    ("unpin_hicache", UnpinHiCacheReqOutput),
+    ("list_pinned_hicache", ListPinnedHiCacheReqOutput),
     ("profile", ProfileReqOutput),
     ("get_internal_state", GetInternalStateReqOutput),
     ("set_internal_state", SetInternalStateReqOutput),
@@ -320,6 +329,41 @@ class TokenizerControlMixin:
             self.server_args.hicache_storage_backend = None
             self.server_args.hicache_storage_backend_extra_config = None
         return out
+
+    async def pin_hicache(
+        self: TokenizerManager, rid: str
+    ) -> PinHiCacheReqOutput:
+        """Pin a request's KV cache in host (CPU) memory."""
+        self.auto_create_handle_loop()
+        results = await self.pin_hicache_communicator(PinHiCacheReqInput(rid=rid))
+        all_success, all_message = FanOutCommunicator.merge_results(results)
+        return PinHiCacheReqOutput(success=all_success, message=all_message)
+
+    async def unpin_hicache(
+        self: TokenizerManager, rid: str
+    ) -> UnpinHiCacheReqOutput:
+        """Unpin a request's KV cache in host (CPU) memory."""
+        self.auto_create_handle_loop()
+        results = await self.unpin_hicache_communicator(UnpinHiCacheReqInput(rid=rid))
+        all_success, all_message = FanOutCommunicator.merge_results(results)
+        return UnpinHiCacheReqOutput(success=all_success, message=all_message)
+
+    async def list_pinned_hicache(
+        self: TokenizerManager,
+    ) -> ListPinnedHiCacheReqOutput:
+        """List currently pinned request IDs."""
+        self.auto_create_handle_loop()
+        results = await self.list_pinned_hicache_communicator(
+            ListPinnedHiCacheReqInput()
+        )
+        # Merge pinned lists from all DP workers (deduplicate)
+        all_rids = set()
+        for r in results:
+            if r.success:
+                all_rids.update(r.pinned_rids)
+        return ListPinnedHiCacheReqOutput(
+            success=True, pinned_rids=sorted(all_rids)
+        )
 
     async def start_profile(
         self: TokenizerManager,

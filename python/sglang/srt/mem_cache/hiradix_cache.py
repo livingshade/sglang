@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import atexit
+import collections
 import heapq
 import json
 import logging
@@ -8,7 +9,7 @@ import os
 import threading
 import time
 from queue import Empty
-from typing import TYPE_CHECKING, Dict, List, Optional
+from typing import TYPE_CHECKING, Dict, List, Optional, Tuple
 
 import torch
 
@@ -185,6 +186,15 @@ class HiRadixCache(RadixCache):
         atexit.register(self.shutdown)
 
         self.evictable_host_leaves = set()
+
+        # Pin tracking: store token IDs for recently completed requests so
+        # users can pin their host-resident KV cache via request ID.
+        self._MAX_COMPLETED_ENTRIES = 10000
+        self._completed_request_tokens: collections.OrderedDict[
+            str, Tuple[list, Optional[str]]
+        ] = collections.OrderedDict()
+        # Maps rid → (token_ids, extra_key) for currently pinned requests.
+        self._pinned_requests: Dict[str, Tuple[list, Optional[str]]] = {}
 
         super().__init__(params=params)
 
@@ -640,6 +650,9 @@ class HiRadixCache(RadixCache):
         # Clear per-request tracking dicts
         self.prefetch_loaded_tokens_by_reqid.clear()
         self.evictable_host_leaves.clear()
+        # Clear pin tracking
+        self._completed_request_tokens.clear()
+        self._pinned_requests.clear()
         super().reset()
 
     def get_height(self, node: TreeNode):
@@ -854,7 +867,7 @@ class HiRadixCache(RadixCache):
         return DecLockRefResult(delta=delta)
 
     def _update_host_leaf_status(self, node: TreeNode):
-        if not node.evicted or node.lock_ref > 0:
+        if not node.evicted or node.lock_ref > 0 or node.pin_count > 0:
             if node in self.evictable_host_leaves:
                 self.evictable_host_leaves.remove(node)
             return
@@ -960,6 +973,9 @@ class HiRadixCache(RadixCache):
             if x.host_ref_counter > 0:
                 continue
 
+            if x.pin_count > 0:
+                continue
+
             # Block deleted entirely (GPU already evicted, now CPU freed) --
             # emit remove(CPU) so the router drops the host-tier entry.
             self._record_remove_event(x, medium=StorageMedium.CPU)
@@ -975,6 +991,130 @@ class HiRadixCache(RadixCache):
             if len(x.parent.children) == 0 and x.parent.evicted:
                 new_priority = self.eviction_strategy.get_priority(x.parent)
                 heapq.heappush(eviction_heap, (new_priority, x.parent))
+
+    # ---- KV cache pin/unpin for host (CPU) memory ----
+
+    def cache_finished_req(self, req, is_insert: bool = True):
+        """Override to record token IDs for completed requests."""
+        # Store token IDs before calling super (which releases the lock_ref)
+        from sglang.srt.managers.schedule_batch import Req
+
+        if isinstance(req, Req) and not self.disable:
+            kv_committed_len = len(req.origin_input_ids) + len(req.output_ids)
+            token_ids = (req.origin_input_ids + req.output_ids)[:kv_committed_len]
+            extra_key = getattr(req, "extra_key", None)
+            rid = req.rid
+
+            # Bounded storage: evict oldest entries
+            if len(self._completed_request_tokens) >= self._MAX_COMPLETED_ENTRIES:
+                self._completed_request_tokens.popitem(last=False)
+            self._completed_request_tokens[rid] = (list(token_ids), extra_key)
+
+        super().cache_finished_req(req, is_insert)
+
+    def _walk_host_path(
+        self, token_ids: list, extra_key: Optional[str]
+    ) -> List[TreeNode]:
+        """Walk the radix tree for the given tokens and return all nodes with host_value."""
+        radix_key = RadixKey(
+            token_ids, extra_key, is_bigram=self.is_eagle
+        ).page_aligned(self.page_size)
+
+        if len(radix_key) == 0:
+            return []
+
+        # Walk the tree following the key to find all nodes along the path
+        node = self.root_node
+        child_key = radix_key.child_key(self.page_size)
+        host_nodes = []
+
+        while len(radix_key) > 0 and child_key in node.children:
+            child = node.children[child_key]
+            prefix_len = child.key.match(radix_key, page_size=self.page_size)
+
+            if child.backuped:
+                host_nodes.append(child)
+
+            if prefix_len < len(child.key):
+                # Partial match — stop here
+                break
+
+            node = child
+            radix_key = radix_key[prefix_len:]
+            if len(radix_key) > 0:
+                child_key = radix_key.child_key(self.page_size)
+
+        return host_nodes
+
+    def pin_host_cache(self, rid: str) -> Tuple[bool, str]:
+        """Pin a request's KV cache blocks in host (CPU) memory.
+
+        Returns (success, message).
+        """
+        # Check if already pinned
+        if rid in self._pinned_requests:
+            return True, f"Request {rid} is already pinned."
+
+        # Look up stored token IDs
+        if rid not in self._completed_request_tokens:
+            return False, (
+                f"Request {rid} not found. Either the request ID is invalid, "
+                f"or it has expired from the completion buffer "
+                f"(max {self._MAX_COMPLETED_ENTRIES} entries)."
+            )
+
+        token_ids, extra_key = self._completed_request_tokens[rid]
+        host_nodes = self._walk_host_path(token_ids, extra_key)
+
+        if not host_nodes:
+            return False, (
+                f"No host-resident KV cache found for request {rid}. "
+                f"The cache may not have been offloaded to CPU yet, "
+                f"or it was already evicted from host memory."
+            )
+
+        # Pin all host-resident nodes
+        pinned_tokens = 0
+        for node in host_nodes:
+            node.pin_count += 1
+            pinned_tokens += len(node.host_value)
+
+        # Move from completed buffer to pinned tracking
+        self._pinned_requests[rid] = (token_ids, extra_key)
+        self._completed_request_tokens.pop(rid, None)
+
+        return True, (
+            f"Pinned {len(host_nodes)} host cache node(s) "
+            f"({pinned_tokens} token slots) for request {rid}."
+        )
+
+    def unpin_host_cache(self, rid: str) -> Tuple[bool, str]:
+        """Unpin a request's KV cache blocks in host (CPU) memory.
+
+        Returns (success, message).
+        """
+        if rid not in self._pinned_requests:
+            return False, f"Request {rid} is not pinned."
+
+        token_ids, extra_key = self._pinned_requests[rid]
+        host_nodes = self._walk_host_path(token_ids, extra_key)
+
+        unpinned_tokens = 0
+        for node in host_nodes:
+            if node.pin_count > 0:
+                node.pin_count -= 1
+                unpinned_tokens += len(node.host_value)
+
+        del self._pinned_requests[rid]
+
+        return True, (
+            f"Unpinned {len(host_nodes)} host cache node(s) "
+            f"({unpinned_tokens} token slots) for request {rid}."
+        )
+
+    def list_pinned_requests(self) -> List[str]:
+        """Return list of currently pinned request IDs."""
+        return list(self._pinned_requests.keys())
 
     def load_back(
         self, node: TreeNode, mem_quota: Optional[int] = None
@@ -1405,6 +1545,9 @@ class HiRadixCache(RadixCache):
         if child.backuped:
             new_node.host_value = child.host_value[:split_len].clone()
             child.host_value = child.host_value[split_len:].clone()
+
+        # Propagate pin count so pinned nodes stay protected after split
+        new_node.pin_count = child.pin_count
 
         new_node.hash_value, child.hash_value = split_node_hash_value(
             child.hash_value, split_len, self.page_size

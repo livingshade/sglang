@@ -952,6 +952,64 @@ async def hicache_storage_backend_status():
     }
 
 
+# example usage:
+# curl -s -X POST http://127.0.0.1:30000/hicache/pin -H 'Content-Type: application/json' -d '{"rid": "request-id-here"}'
+@app.api_route("/hicache/pin", methods=["POST"])
+@auth_level(AuthLevel.ADMIN_OPTIONAL)
+async def pin_hicache_host_cache(request: Request):
+    """Pin a request's KV cache in host (CPU) memory to prevent eviction.
+
+    The request ID (rid) must correspond to a recently completed request.
+    Once pinned, the host-resident KV cache blocks will not be evicted
+    until explicitly unpinned via POST /hicache/unpin.
+    """
+    body = await request.json()
+    rid = body.get("rid")
+    if not rid:
+        return Response(
+            content="Missing 'rid' field in request body.\n",
+            status_code=400,
+        )
+    ret = await _global_state.tokenizer_manager.pin_hicache(rid=rid)
+    return Response(
+        content=ret.message + "\n",
+        status_code=200 if ret.success else 400,
+    )
+
+
+# example usage:
+# curl -s -X POST http://127.0.0.1:30000/hicache/unpin -H 'Content-Type: application/json' -d '{"rid": "request-id-here"}'
+@app.api_route("/hicache/unpin", methods=["POST"])
+@auth_level(AuthLevel.ADMIN_OPTIONAL)
+async def unpin_hicache_host_cache(request: Request):
+    """Unpin a request's KV cache in host (CPU) memory, allowing eviction.
+
+    The request ID (rid) must correspond to a currently pinned request.
+    """
+    body = await request.json()
+    rid = body.get("rid")
+    if not rid:
+        return Response(
+            content="Missing 'rid' field in request body.\n",
+            status_code=400,
+        )
+    ret = await _global_state.tokenizer_manager.unpin_hicache(rid=rid)
+    return Response(
+        content=ret.message + "\n",
+        status_code=200 if ret.success else 400,
+    )
+
+
+# example usage:
+# curl -s http://127.0.0.1:30000/hicache/pinned
+@app.get("/hicache/pinned")
+@auth_level(AuthLevel.ADMIN_OPTIONAL)
+async def list_pinned_hicache():
+    """List all currently pinned request IDs."""
+    ret = await _global_state.tokenizer_manager.list_pinned_hicache()
+    return {"pinned_rids": ret.pinned_rids}
+
+
 @app.api_route("/start_profile", methods=["GET", "POST"])
 @auth_level(AuthLevel.ADMIN_OPTIONAL)
 async def start_profile_async(obj: Optional[ProfileReqInput] = None):

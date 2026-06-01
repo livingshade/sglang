@@ -100,6 +100,7 @@ from sglang.srt.managers.io_struct import (
     DetachHiCacheStorageReqInput,
     DetachHiCacheStorageReqOutput,
     DumperControlReqInput,
+    DumperControlReqInput,
     DumperControlReqOutput,
     ExpertDistributionReq,
     ExpertDistributionReqOutput,
@@ -116,12 +117,16 @@ from sglang.srt.managers.io_struct import (
     InitWeightsUpdateGroupReqInput,
     ListExternalCorporaReqInput,
     ListExternalCorporaReqOutput,
+    ListPinnedHiCacheReqInput,
+    ListPinnedHiCacheReqOutput,
     LoadLoRAAdapterFromTensorsReqInput,
     LoadLoRAAdapterFromTensorsReqOutput,
     LoadLoRAAdapterReqInput,
     LoadLoRAAdapterReqOutput,
     OpenSessionReqInput,
     PauseGenerationReqInput,
+    PinHiCacheReqInput,
+    PinHiCacheReqOutput,
     ProfileReq,
     ReleaseMemoryOccupationReqInput,
     RemoveExternalCorpusReqInput,
@@ -139,6 +144,8 @@ from sglang.srt.managers.io_struct import (
     TokenizedGenerateReqInput,
     UnloadLoRAAdapterReqInput,
     UnloadLoRAAdapterReqOutput,
+    UnpinHiCacheReqInput,
+    UnpinHiCacheReqOutput,
     UpdateWeightFromDiskReqInput,
     UpdateWeightsFromDistributedReqInput,
     UpdateWeightsFromIPCReqInput,
@@ -1229,6 +1236,9 @@ class Scheduler(
                 (ClearHiCacheReqInput, self.clear_hicache_storage_wrapped),
                 (AttachHiCacheStorageReqInput, self.attach_hicache_storage_wrapped),
                 (DetachHiCacheStorageReqInput, self.detach_hicache_storage_wrapped),
+                (PinHiCacheReqInput, self.pin_hicache_wrapped),
+                (UnpinHiCacheReqInput, self.unpin_hicache_wrapped),
+                (ListPinnedHiCacheReqInput, self.list_pinned_hicache_wrapped),
                 (AbortReq, self.abort_request),
                 (OpenSessionReqInput, self.open_session),
                 (CloseSessionReqInput, self.close_session),
@@ -3154,6 +3164,31 @@ class Scheduler(
             logging.warning("Hierarchical cache is not enabled.")
             if_success = False
         return ClearHiCacheReqOutput(success=if_success)
+
+    def pin_hicache_wrapped(self, recv_req: PinHiCacheReqInput):
+        if not self.enable_hierarchical_cache:
+            return PinHiCacheReqOutput(
+                success=False, message="Hierarchical cache is not enabled."
+            )
+        success, message = self.tree_cache.pin_host_cache(recv_req.rid)
+        return PinHiCacheReqOutput(success=success, message=message)
+
+    def unpin_hicache_wrapped(self, recv_req: UnpinHiCacheReqInput):
+        if not self.enable_hierarchical_cache:
+            return UnpinHiCacheReqOutput(
+                success=False, message="Hierarchical cache is not enabled."
+            )
+        success, message = self.tree_cache.unpin_host_cache(recv_req.rid)
+        return UnpinHiCacheReqOutput(success=success, message=message)
+
+    def list_pinned_hicache_wrapped(self, recv_req: ListPinnedHiCacheReqInput):
+        if not self.enable_hierarchical_cache:
+            return ListPinnedHiCacheReqOutput(
+                success=False,
+                message="Hierarchical cache is not enabled.",
+            )
+        pinned_rids = self.tree_cache.list_pinned_requests()
+        return ListPinnedHiCacheReqOutput(success=True, pinned_rids=pinned_rids)
 
     def on_idle(self):
         """Idle housekeeping: guard, check, metrics, reset, sleep."""

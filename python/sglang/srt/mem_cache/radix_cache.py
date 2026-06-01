@@ -222,6 +222,8 @@ class TreeNode:
         # indicating the node is locked to protect from eviction
         # incremented when the node is referenced by a storage operation
         self.host_ref_counter = 0
+        # user-facing pin count: prevents host eviction when > 0
+        self.pin_count = 0
         # store the host indices of KV cache
         self.host_value: Optional[torch.Tensor] = None
         # store hash values of each pages

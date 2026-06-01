@@ -1358,6 +1358,46 @@ class DetachHiCacheStorageReqOutput(BaseReq):
 
 
 @dataclass
+class PinHiCacheReqInput(BaseReq):
+    """Pin a request's KV cache in host (CPU) memory to prevent eviction."""
+
+    rid: str
+
+
+@dataclass
+class PinHiCacheReqOutput(BaseReq):
+    success: bool
+    message: str = ""
+
+
+@dataclass
+class UnpinHiCacheReqInput(BaseReq):
+    """Unpin a request's KV cache in host (CPU) memory."""
+
+    rid: str
+
+
+@dataclass
+class UnpinHiCacheReqOutput(BaseReq):
+    success: bool
+    message: str = ""
+
+
+@dataclass
+class ListPinnedHiCacheReqInput(BaseReq):
+    """List currently pinned request IDs."""
+
+    pass
+
+
+@dataclass
+class ListPinnedHiCacheReqOutput(BaseReq):
+    success: bool
+    pinned_rids: List[str] = field(default_factory=list)
+    message: str = ""
+
+
+@dataclass
 class PauseGenerationReqInput(BaseReq):
     """
     Note that the PauseGenerationRequests is only supported in SGLang Server.
