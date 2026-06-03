@@ -966,13 +966,13 @@ async def pin_hicache_host_cache(request: Request):
     body = await request.json()
     rid = body.get("rid")
     if not rid:
-        return Response(
-            content="Missing 'rid' field in request body.\n",
+        return ORJSONResponse(
+            content={"success": False, "message": "Missing 'rid' field in request body."},
             status_code=400,
         )
     ret = await _global_state.tokenizer_manager.pin_hicache(rid=rid)
-    return Response(
-        content=ret.message + "\n",
+    return ORJSONResponse(
+        content={"success": ret.success, "message": ret.message},
         status_code=200 if ret.success else 400,
     )
 
@@ -989,13 +989,13 @@ async def unpin_hicache_host_cache(request: Request):
     body = await request.json()
     rid = body.get("rid")
     if not rid:
-        return Response(
-            content="Missing 'rid' field in request body.\n",
+        return ORJSONResponse(
+            content={"success": False, "message": "Missing 'rid' field in request body."},
             status_code=400,
         )
     ret = await _global_state.tokenizer_manager.unpin_hicache(rid=rid)
-    return Response(
-        content=ret.message + "\n",
+    return ORJSONResponse(
+        content={"success": ret.success, "message": ret.message},
         status_code=200 if ret.success else 400,
     )
 
@@ -1023,13 +1023,13 @@ async def offload_hicache_request(request: Request):
     body = await request.json()
     rid = body.get("rid")
     if not rid:
-        return Response(
-            content="Missing 'rid' field in request body.\n",
+        return ORJSONResponse(
+            content={"success": False, "message": "Missing 'rid' field in request body."},
             status_code=400,
         )
     ret = await _global_state.tokenizer_manager.offload_hicache(rid=rid)
-    return Response(
-        content=ret.message + "\n",
+    return ORJSONResponse(
+        content={"success": ret.success, "message": ret.message},
         status_code=200 if ret.success else 400,
     )
 
