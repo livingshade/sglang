@@ -3190,8 +3190,13 @@ class Scheduler(
                 success=False,
                 message="Hierarchical cache is not enabled.",
             )
-        pinned_rids = self.tree_cache.list_pinned_requests()
-        return ListPinnedHiCacheReqOutput(success=True, pinned_rids=pinned_rids)
+        pinned_rids, pinned_tokens, host_capacity = self.tree_cache.list_pinned_requests()
+        return ListPinnedHiCacheReqOutput(
+            success=True,
+            pinned_rids=pinned_rids,
+            pinned_tokens=pinned_tokens,
+            host_capacity=host_capacity,
+        )
 
     def offload_hicache_wrapped(self, recv_req: OffloadHiCacheReqInput):
         if not self.enable_hierarchical_cache:

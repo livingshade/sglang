@@ -193,8 +193,14 @@ class HiRadixCache(RadixCache):
         self._completed_request_tokens: collections.OrderedDict[
             str, Tuple[list, Optional[str]]
         ] = collections.OrderedDict()
-        # Maps rid → (token_ids, extra_key) for currently pinned requests.
-        self._pinned_requests: Dict[str, Tuple[list, Optional[str]]] = {}
+        # Maps rid → (token_ids, extra_key, pinned_token_count) for currently
+        # pinned requests.  pinned_token_count records the *newly* pinned
+        # tokens attributed to this rid (nodes whose pin_count went from 0→1).
+        self._pinned_requests: Dict[str, Tuple[list, Optional[str], int]] = {}
+        # Aggregate count of host token slots that are pinned (non-evictable).
+        self._pinned_host_tokens: int = 0
+        # Fraction of host pool that may be pinned before new pins are rejected.
+        self._PIN_CAPACITY_RATIO = 0.9
 
         super().__init__(params=params)
 
@@ -653,6 +659,7 @@ class HiRadixCache(RadixCache):
         # Clear pin tracking
         self._completed_request_tokens.clear()
         self._pinned_requests.clear()
+        self._pinned_host_tokens = 0
         super().reset()
 
     def get_height(self, node: TreeNode):
@@ -1014,19 +1021,27 @@ class HiRadixCache(RadixCache):
 
     def _walk_host_path(
         self, token_ids: list, extra_key: Optional[str]
-    ) -> List[TreeNode]:
-        """Walk the radix tree for the given tokens and return all nodes with host_value."""
+    ) -> Tuple[List[TreeNode], int, int]:
+        """Walk the radix tree for the given tokens and return host-resident nodes.
+
+        Returns:
+            (host_nodes, matched_host_tokens, expected_tokens)
+            where matched_host_tokens is the total token coverage of returned
+            nodes and expected_tokens is the page-aligned length of the key.
+        """
         radix_key = RadixKey(
             token_ids, extra_key, is_bigram=self.is_eagle
         ).page_aligned(self.page_size)
 
-        if len(radix_key) == 0:
-            return []
+        expected_tokens = len(radix_key)
+        if expected_tokens == 0:
+            return [], 0, 0
 
         # Walk the tree following the key to find all nodes along the path
         node = self.root_node
         child_key = radix_key.child_key(self.page_size)
         host_nodes = []
+        matched_host_tokens = 0
 
         while len(radix_key) > 0 and child_key in node.children:
             child = node.children[child_key]
@@ -1034,6 +1049,7 @@ class HiRadixCache(RadixCache):
 
             if child.backuped:
                 host_nodes.append(child)
+                matched_host_tokens += len(child.host_value)
 
             if prefix_len < len(child.key):
                 # Partial match — stop here
@@ -1044,7 +1060,7 @@ class HiRadixCache(RadixCache):
             if len(radix_key) > 0:
                 child_key = radix_key.child_key(self.page_size)
 
-        return host_nodes
+        return host_nodes, matched_host_tokens, expected_tokens
 
     def pin_host_cache(self, rid: str) -> Tuple[bool, str]:
         """Pin a request's KV cache blocks in host (CPU) memory.
@@ -1064,7 +1080,9 @@ class HiRadixCache(RadixCache):
             )
 
         token_ids, extra_key = self._completed_request_tokens[rid]
-        host_nodes = self._walk_host_path(token_ids, extra_key)
+        host_nodes, matched_tokens, expected_tokens = self._walk_host_path(
+            token_ids, extra_key
+        )
 
         if not host_nodes:
             return False, (
@@ -1073,14 +1091,34 @@ class HiRadixCache(RadixCache):
                 f"or it was already evicted from host memory."
             )
 
+        # Note: matched_tokens < expected_tokens is normal when some nodes
+        # are still GPU-resident and haven't been backed up to host yet.
+        # We pin whatever host-resident nodes exist.
+
+        # Capacity check: count only tokens from nodes not already pinned
+        new_pinned_tokens = sum(
+            len(n.host_value) for n in host_nodes if n.pin_count == 0
+        )
+        total_host = self.cache_controller.mem_pool_host.size
+        pin_limit = int(total_host * self._PIN_CAPACITY_RATIO)
+        if self._pinned_host_tokens + new_pinned_tokens > pin_limit:
+            return False, (
+                f"Cannot pin request {rid}: pinned host cache limit reached. "
+                f"Currently {self._pinned_host_tokens}/{pin_limit} token slots "
+                f"are pinned (limit is {self._PIN_CAPACITY_RATIO:.0%} of "
+                f"{total_host} total host slots). "
+                f"Unpin existing requests before pinning new ones."
+            )
+
         # Pin all host-resident nodes
         pinned_tokens = 0
         for node in host_nodes:
             node.pin_count += 1
             pinned_tokens += len(node.host_value)
 
-        # Move from completed buffer to pinned tracking
-        self._pinned_requests[rid] = (token_ids, extra_key)
+        self._pinned_host_tokens += new_pinned_tokens
+        # Move from completed buffer to pinned tracking (store token count)
+        self._pinned_requests[rid] = (token_ids, extra_key, new_pinned_tokens)
         self._completed_request_tokens.pop(rid, None)
 
         return True, (
@@ -1096,8 +1134,10 @@ class HiRadixCache(RadixCache):
         if rid not in self._pinned_requests:
             return False, f"Request {rid} is not pinned."
 
-        token_ids, extra_key = self._pinned_requests[rid]
-        host_nodes = self._walk_host_path(token_ids, extra_key)
+        token_ids, extra_key, attributed_tokens = self._pinned_requests[rid]
+        host_nodes, _matched, _expected = self._walk_host_path(
+            token_ids, extra_key
+        )
 
         unpinned_tokens = 0
         for node in host_nodes:
@@ -1105,6 +1145,10 @@ class HiRadixCache(RadixCache):
                 node.pin_count -= 1
                 unpinned_tokens += len(node.host_value)
 
+        # Use the stored attributed count for deterministic accounting
+        self._pinned_host_tokens = max(
+            0, self._pinned_host_tokens - attributed_tokens
+        )
         del self._pinned_requests[rid]
 
         return True, (
@@ -1112,9 +1156,14 @@ class HiRadixCache(RadixCache):
             f"({unpinned_tokens} token slots) for request {rid}."
         )
 
-    def list_pinned_requests(self) -> List[str]:
-        """Return list of currently pinned request IDs."""
-        return list(self._pinned_requests.keys())
+    def list_pinned_requests(self) -> Tuple[List[str], int, int]:
+        """Return pinned request IDs, pinned token count, and host capacity."""
+        total_host = self.cache_controller.mem_pool_host.size
+        return (
+            list(self._pinned_requests.keys()),
+            self._pinned_host_tokens,
+            total_host,
+        )
 
     def _walk_all_nodes(
         self, token_ids: list, extra_key: Optional[str]
@@ -1160,7 +1209,7 @@ class HiRadixCache(RadixCache):
         if rid in self._completed_request_tokens:
             token_ids, extra_key = self._completed_request_tokens[rid]
         elif rid in self._pinned_requests:
-            token_ids, extra_key = self._pinned_requests[rid]
+            token_ids, extra_key, _pinned_count = self._pinned_requests[rid]
         else:
             return False, (
                 f"Request {rid} not found. Either the request ID is invalid, "

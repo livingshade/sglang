@@ -1007,7 +1007,11 @@ async def unpin_hicache_host_cache(request: Request):
 async def list_pinned_hicache():
     """List all currently pinned request IDs."""
     ret = await _global_state.tokenizer_manager.list_pinned_hicache()
-    return {"pinned_rids": ret.pinned_rids}
+    return {
+        "pinned_rids": ret.pinned_rids,
+        "pinned_tokens": ret.pinned_tokens,
+        "host_capacity": ret.host_capacity,
+    }
 
 
 # example usage:

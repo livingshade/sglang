@@ -1394,6 +1394,8 @@ class ListPinnedHiCacheReqInput(BaseReq):
 class ListPinnedHiCacheReqOutput(BaseReq):
     success: bool
     pinned_rids: List[str] = field(default_factory=list)
+    pinned_tokens: int = 0
+    host_capacity: int = 0
     message: str = ""
 
 

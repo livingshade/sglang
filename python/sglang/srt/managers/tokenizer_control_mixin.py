@@ -361,11 +361,18 @@ class TokenizerControlMixin:
         )
         # Merge pinned lists from all DP workers (deduplicate)
         all_rids = set()
+        total_pinned_tokens = 0
+        total_host_capacity = 0
         for r in results:
             if r.success:
                 all_rids.update(r.pinned_rids)
+                total_pinned_tokens += r.pinned_tokens
+                total_host_capacity += r.host_capacity
         return ListPinnedHiCacheReqOutput(
-            success=True, pinned_rids=sorted(all_rids)
+            success=True,
+            pinned_rids=sorted(all_rids),
+            pinned_tokens=total_pinned_tokens,
+            host_capacity=total_host_capacity,
         )
 
     async def offload_hicache(
