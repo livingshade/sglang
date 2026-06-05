@@ -1342,6 +1342,13 @@ class HiRadixCache(RadixCache):
             len(host_indices) > mem_quota + delta if mem_quota is not None else False
         ):
             # skip loading back if the total size is too small or exceeding the memory quota
+            logger.info(
+                "[HiCache-Pin] load_back_skip node=%d tokens=%d "
+                "threshold=%d mem_quota=%s",
+                last_hit_node.id, len(host_indices),
+                self.load_back_threshold,
+                mem_quota,
+            )
             self.dec_lock_ref(ancester_node)
             return None
 
@@ -1379,6 +1386,15 @@ class HiRadixCache(RadixCache):
             self._record_store_event(node, medium=StorageMedium.GPU)
         self.evictable_size_ += len(device_indices)
         self.inc_lock_ref(last_hit_node)
+
+        load_duration = time.perf_counter() - start_time
+        is_pinned = any(n.pin_count > 0 for n in nodes_to_load)
+        logger.info(
+            "[HiCache-Pin] load_back_ok node=%d tokens=%d "
+            "nodes=%d pinned=%s duration_ms=%.2f",
+            last_hit_node.id, len(device_indices),
+            len(nodes_to_load), is_pinned, load_duration * 1000,
+        )
 
         if self.metrics_collector is not None:
             self.metrics_collector.observe_load_back_duration(
@@ -1592,6 +1608,15 @@ class HiRadixCache(RadixCache):
             last_node = last_node.parent
         while not last_host_node.backuped:
             last_host_node = last_host_node.parent
+
+        if host_hit_length > 0:
+            logger.info(
+                "[HiCache-Pin] match_prefix_host_hit "
+                "gpu_tokens=%d host_tokens=%d node=%d pinned=%s",
+                len(value) if isinstance(value, torch.Tensor) else 0,
+                host_hit_length, last_host_node.id,
+                last_host_node.pin_count > 0,
+            )
 
         return MatchResult(
             device_indices=value,
