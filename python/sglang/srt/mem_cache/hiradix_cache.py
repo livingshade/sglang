@@ -1617,6 +1617,11 @@ class HiRadixCache(RadixCache):
                 host_hit_length, last_host_node.id,
                 last_host_node.pin_count > 0,
             )
+        elif isinstance(value, torch.Tensor) and len(value) > 0:
+            logger.info(
+                "[HiCache-Pin] match_prefix_gpu_hit gpu_tokens=%d node=%d",
+                len(value), last_node.id,
+            )
 
         return MatchResult(
             device_indices=value,
