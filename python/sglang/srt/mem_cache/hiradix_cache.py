@@ -69,6 +69,11 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# Verbose correctness logging for HiCache pin/unpin/eviction/load_back.
+# Disabled by default to avoid performance degradation in production.
+# Set SGLANG_HICACHE_CORRECTNESS=1 to enable.
+_HICACHE_CORRECTNESS = os.environ.get("SGLANG_HICACHE_CORRECTNESS", "0") == "1"
+
 
 class HiRadixCache(RadixCache):
 
@@ -876,10 +881,11 @@ class HiRadixCache(RadixCache):
     def _update_host_leaf_status(self, node: TreeNode):
         if not node.evicted or node.lock_ref > 0 or node.pin_count > 0:
             if node.pin_count > 0 and node.evicted and node in self.evictable_host_leaves:
-                logger.info(
-                    "[HiCache-Pin] host_leaf_protected node=%d pin_count=%d",
-                    node.id, node.pin_count,
-                )
+                if _HICACHE_CORRECTNESS:
+                    logger.info(
+                        "[HiCache-Pin] host_leaf_protected node=%d pin_count=%d",
+                        node.id, node.pin_count,
+                    )
             if node in self.evictable_host_leaves:
                 self.evictable_host_leaves.remove(node)
             return
@@ -986,12 +992,13 @@ class HiRadixCache(RadixCache):
                 continue
 
             if x.pin_count > 0:
-                logger.info(
-                    "[HiCache-Pin] evict_host_skip_pinned node=%d "
-                    "pin_count=%d host_tokens=%d",
-                    x.id, x.pin_count,
-                    len(x.host_value) if x.host_value is not None else 0,
-                )
+                if _HICACHE_CORRECTNESS:
+                    logger.info(
+                        "[HiCache-Pin] evict_host_skip_pinned node=%d "
+                        "pin_count=%d host_tokens=%d",
+                        x.id, x.pin_count,
+                        len(x.host_value) if x.host_value is not None else 0,
+                    )
                 continue
 
             # Block deleted entirely (GPU already evicted, now CPU freed) --
@@ -1026,20 +1033,22 @@ class HiRadixCache(RadixCache):
             # Bounded storage: evict oldest entries
             if len(self._completed_request_tokens) >= self._MAX_COMPLETED_ENTRIES:
                 evicted_rid, _ = self._completed_request_tokens.popitem(last=False)
-                logger.info(
-                    "[HiCache-Pin] completion_buffer_evict rid=%s "
-                    "buffer_size=%d max=%d",
-                    evicted_rid,
-                    len(self._completed_request_tokens),
-                    self._MAX_COMPLETED_ENTRIES,
-                )
+                if _HICACHE_CORRECTNESS:
+                    logger.info(
+                        "[HiCache-Pin] completion_buffer_evict rid=%s "
+                        "buffer_size=%d max=%d",
+                        evicted_rid,
+                        len(self._completed_request_tokens),
+                        self._MAX_COMPLETED_ENTRIES,
+                    )
             self._completed_request_tokens[rid] = (list(token_ids), extra_key)
-            logger.info(
-                "[HiCache-Pin] cache_finished_req rid=%s tokens=%d "
-                "buffer_size=%d",
-                rid, len(token_ids),
-                len(self._completed_request_tokens),
-            )
+            if _HICACHE_CORRECTNESS:
+                logger.info(
+                    "[HiCache-Pin] cache_finished_req rid=%s tokens=%d "
+                    "buffer_size=%d",
+                    rid, len(token_ids),
+                    len(self._completed_request_tokens),
+                )
 
         super().cache_finished_req(req, is_insert)
 
@@ -1093,12 +1102,14 @@ class HiRadixCache(RadixCache):
         """
         # Check if already pinned
         if rid in self._pinned_requests:
-            logger.info("[HiCache-Pin] pin_already rid=%s", rid)
+            if _HICACHE_CORRECTNESS:
+                logger.info("[HiCache-Pin] pin_already rid=%s", rid)
             return True, f"Request {rid} is already pinned."
 
         # Look up stored token IDs
         if rid not in self._completed_request_tokens:
-            logger.info("[HiCache-Pin] pin_not_found rid=%s", rid)
+            if _HICACHE_CORRECTNESS:
+                logger.info("[HiCache-Pin] pin_not_found rid=%s", rid)
             return False, (
                 f"Request {rid} not found. Either the request ID is invalid, "
                 f"or it has expired from the completion buffer "
@@ -1111,11 +1122,12 @@ class HiRadixCache(RadixCache):
         )
 
         if not host_nodes:
-            logger.info(
-                "[HiCache-Pin] pin_no_host_nodes rid=%s "
-                "matched=%d expected=%d",
-                rid, matched_tokens, expected_tokens,
-            )
+            if _HICACHE_CORRECTNESS:
+                logger.info(
+                    "[HiCache-Pin] pin_no_host_nodes rid=%s "
+                    "matched=%d expected=%d",
+                    rid, matched_tokens, expected_tokens,
+                )
             return False, (
                 f"No host-resident KV cache found for request {rid}. "
                 f"The cache may not have been offloaded to CPU yet, "
@@ -1133,12 +1145,13 @@ class HiRadixCache(RadixCache):
         total_host = self.cache_controller.mem_pool_host.size
         pin_limit = int(total_host * self._PIN_CAPACITY_RATIO)
         if self._pinned_host_tokens + new_pinned_tokens > pin_limit:
-            logger.info(
-                "[HiCache-Pin] pin_capacity_reject rid=%s "
-                "current=%d new=%d limit=%d total_host=%d",
-                rid, self._pinned_host_tokens, new_pinned_tokens,
-                pin_limit, total_host,
-            )
+            if _HICACHE_CORRECTNESS:
+                logger.info(
+                    "[HiCache-Pin] pin_capacity_reject rid=%s "
+                    "current=%d new=%d limit=%d total_host=%d",
+                    rid, self._pinned_host_tokens, new_pinned_tokens,
+                    pin_limit, total_host,
+                )
             return False, (
                 f"Cannot pin request {rid}: pinned host cache limit reached. "
                 f"Currently {self._pinned_host_tokens}/{pin_limit} token slots "
@@ -1158,12 +1171,13 @@ class HiRadixCache(RadixCache):
         self._pinned_requests[rid] = (token_ids, extra_key, new_pinned_tokens)
         self._completed_request_tokens.pop(rid, None)
 
-        logger.info(
-            "[HiCache-Pin] pin_ok rid=%s nodes=%d pinned_tokens=%d "
-            "new_attributed=%d total_pinned=%d",
-            rid, len(host_nodes), pinned_tokens,
-            new_pinned_tokens, self._pinned_host_tokens,
-        )
+        if _HICACHE_CORRECTNESS:
+            logger.info(
+                "[HiCache-Pin] pin_ok rid=%s nodes=%d pinned_tokens=%d "
+                "new_attributed=%d total_pinned=%d",
+                rid, len(host_nodes), pinned_tokens,
+                new_pinned_tokens, self._pinned_host_tokens,
+            )
 
         return True, (
             f"Pinned {len(host_nodes)} host cache node(s) "
@@ -1176,7 +1190,8 @@ class HiRadixCache(RadixCache):
         Returns (success, message).
         """
         if rid not in self._pinned_requests:
-            logger.info("[HiCache-Pin] unpin_not_pinned rid=%s", rid)
+            if _HICACHE_CORRECTNESS:
+                logger.info("[HiCache-Pin] unpin_not_pinned rid=%s", rid)
             return False, f"Request {rid} is not pinned."
 
         token_ids, extra_key, attributed_tokens = self._pinned_requests[rid]
@@ -1196,12 +1211,13 @@ class HiRadixCache(RadixCache):
         )
         del self._pinned_requests[rid]
 
-        logger.info(
-            "[HiCache-Pin] unpin_ok rid=%s nodes=%d unpinned_tokens=%d "
-            "attributed=%d total_pinned=%d",
-            rid, len(host_nodes), unpinned_tokens,
-            attributed_tokens, self._pinned_host_tokens,
-        )
+        if _HICACHE_CORRECTNESS:
+            logger.info(
+                "[HiCache-Pin] unpin_ok rid=%s nodes=%d unpinned_tokens=%d "
+                "attributed=%d total_pinned=%d",
+                rid, len(host_nodes), unpinned_tokens,
+                attributed_tokens, self._pinned_host_tokens,
+            )
 
         return True, (
             f"Unpinned {len(host_nodes)} host cache node(s) "
@@ -1342,13 +1358,14 @@ class HiRadixCache(RadixCache):
             len(host_indices) > mem_quota + delta if mem_quota is not None else False
         ):
             # skip loading back if the total size is too small or exceeding the memory quota
-            logger.info(
-                "[HiCache-Pin] load_back_skip node=%d tokens=%d "
-                "threshold=%d mem_quota=%s",
-                last_hit_node.id, len(host_indices),
-                self.load_back_threshold,
-                mem_quota,
-            )
+            if _HICACHE_CORRECTNESS:
+                logger.info(
+                    "[HiCache-Pin] load_back_skip node=%d tokens=%d "
+                    "threshold=%d mem_quota=%s",
+                    last_hit_node.id, len(host_indices),
+                    self.load_back_threshold,
+                    mem_quota,
+                )
             self.dec_lock_ref(ancester_node)
             return None
 
@@ -1389,12 +1406,13 @@ class HiRadixCache(RadixCache):
 
         load_duration = time.perf_counter() - start_time
         is_pinned = any(n.pin_count > 0 for n in nodes_to_load)
-        logger.info(
-            "[HiCache-Pin] load_back_ok node=%d tokens=%d "
-            "nodes=%d pinned=%s duration_ms=%.2f",
-            last_hit_node.id, len(device_indices),
-            len(nodes_to_load), is_pinned, load_duration * 1000,
-        )
+        if _HICACHE_CORRECTNESS:
+            logger.info(
+                "[HiCache-Pin] load_back_ok node=%d tokens=%d "
+                "nodes=%d pinned=%s duration_ms=%.2f",
+                last_hit_node.id, len(device_indices),
+                len(nodes_to_load), is_pinned, load_duration * 1000,
+            )
 
         if self.metrics_collector is not None:
             self.metrics_collector.observe_load_back_duration(
@@ -1610,18 +1628,20 @@ class HiRadixCache(RadixCache):
             last_host_node = last_host_node.parent
 
         if host_hit_length > 0:
-            logger.info(
-                "[HiCache-Pin] match_prefix_host_hit "
-                "gpu_tokens=%d host_tokens=%d node=%d pinned=%s",
-                len(value) if isinstance(value, torch.Tensor) else 0,
-                host_hit_length, last_host_node.id,
-                last_host_node.pin_count > 0,
-            )
+            if _HICACHE_CORRECTNESS:
+                logger.info(
+                    "[HiCache-Pin] match_prefix_host_hit "
+                    "gpu_tokens=%d host_tokens=%d node=%d pinned=%s",
+                    len(value) if isinstance(value, torch.Tensor) else 0,
+                    host_hit_length, last_host_node.id,
+                    last_host_node.pin_count > 0,
+                )
         elif isinstance(value, torch.Tensor) and len(value) > 0:
-            logger.info(
-                "[HiCache-Pin] match_prefix_gpu_hit gpu_tokens=%d node=%d",
-                len(value), last_node.id,
-            )
+            if _HICACHE_CORRECTNESS:
+                logger.info(
+                    "[HiCache-Pin] match_prefix_gpu_hit gpu_tokens=%d node=%d",
+                    len(value), last_node.id,
+                )
 
         return MatchResult(
             device_indices=value,
@@ -1779,11 +1799,12 @@ class HiRadixCache(RadixCache):
         # Propagate pin count so pinned nodes stay protected after split
         new_node.pin_count = child.pin_count
         if child.pin_count > 0:
-            logger.info(
-                "[HiCache-Pin] split_propagate old_node=%d new_node=%d "
-                "pin_count=%d",
-                child.id, new_node.id, child.pin_count,
-            )
+            if _HICACHE_CORRECTNESS:
+                logger.info(
+                    "[HiCache-Pin] split_propagate old_node=%d new_node=%d "
+                    "pin_count=%d",
+                    child.id, new_node.id, child.pin_count,
+                )
 
         new_node.hash_value, child.hash_value = split_node_hash_value(
             child.hash_value, split_len, self.page_size
