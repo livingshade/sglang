@@ -192,6 +192,7 @@ class HiRadixCache(RadixCache):
 
         self.evictable_host_leaves = set()
 
+        # ---- [AZ-HiCache-Pin] Begin: pin tracking data structures ----
         # Pin tracking: store token IDs for recently completed requests so
         # users can pin their host-resident KV cache via request ID.
         self._MAX_COMPLETED_ENTRIES = 10000
@@ -206,6 +207,7 @@ class HiRadixCache(RadixCache):
         self._pinned_host_tokens: int = 0
         # Fraction of host pool that may be pinned before new pins are rejected.
         self._PIN_CAPACITY_RATIO = 0.9
+        # ---- [AZ-HiCache-Pin] End: pin tracking data structures ----
 
         super().__init__(params=params)
 
@@ -661,7 +663,7 @@ class HiRadixCache(RadixCache):
         # Clear per-request tracking dicts
         self.prefetch_loaded_tokens_by_reqid.clear()
         self.evictable_host_leaves.clear()
-        # Clear pin tracking
+        # [AZ-HiCache-Pin] Clear pin tracking
         self._completed_request_tokens.clear()
         self._pinned_requests.clear()
         self._pinned_host_tokens = 0
@@ -1017,10 +1019,10 @@ class HiRadixCache(RadixCache):
                 new_priority = self.eviction_strategy.get_priority(x.parent)
                 heapq.heappush(eviction_heap, (new_priority, x.parent))
 
-    # ---- KV cache pin/unpin for host (CPU) memory ----
+    # ---- [AZ-HiCache-Pin] Begin: pin/unpin/offload implementation ----
 
     def cache_finished_req(self, req, is_insert: bool = True):
-        """Override to record token IDs for completed requests."""
+        """[AZ-HiCache-Pin] Override to record token IDs for completed requests."""
         # Store token IDs before calling super (which releases the lock_ref)
         from sglang.srt.managers.schedule_batch import Req
 
@@ -1055,7 +1057,7 @@ class HiRadixCache(RadixCache):
     def _walk_host_path(
         self, token_ids: list, extra_key: Optional[str]
     ) -> Tuple[List[TreeNode], int, int]:
-        """Walk the radix tree for the given tokens and return host-resident nodes.
+        """[AZ-HiCache-Pin] Walk the radix tree for the given tokens and return host-resident nodes.
 
         Returns:
             (host_nodes, matched_host_tokens, expected_tokens)
@@ -1096,7 +1098,7 @@ class HiRadixCache(RadixCache):
         return host_nodes, matched_host_tokens, expected_tokens
 
     def pin_host_cache(self, rid: str) -> Tuple[bool, str]:
-        """Pin a request's KV cache blocks in host (CPU) memory.
+        """[AZ-HiCache-Pin] Pin a request's KV cache blocks in host (CPU) memory.
 
         Returns (success, message).
         """
@@ -1185,7 +1187,7 @@ class HiRadixCache(RadixCache):
         )
 
     def unpin_host_cache(self, rid: str) -> Tuple[bool, str]:
-        """Unpin a request's KV cache blocks in host (CPU) memory.
+        """[AZ-HiCache-Pin] Unpin a request's KV cache blocks in host (CPU) memory.
 
         Returns (success, message).
         """
@@ -1225,7 +1227,7 @@ class HiRadixCache(RadixCache):
         )
 
     def list_pinned_requests(self) -> Tuple[List[str], int, int]:
-        """Return pinned request IDs, pinned token count, and host capacity."""
+        """[AZ-HiCache-Pin] Return pinned request IDs, pinned token count, and host capacity."""
         total_host = self.cache_controller.mem_pool_host.size
         return (
             list(self._pinned_requests.keys()),
@@ -1236,7 +1238,7 @@ class HiRadixCache(RadixCache):
     def _walk_all_nodes(
         self, token_ids: list, extra_key: Optional[str]
     ) -> List[TreeNode]:
-        """Walk the radix tree for the given tokens and return all matched nodes."""
+        """[AZ-HiCache-Pin] Walk the radix tree for the given tokens and return all matched nodes."""
         radix_key = RadixKey(
             token_ids, extra_key, is_bigram=self.is_eagle
         ).page_aligned(self.page_size)
@@ -1264,7 +1266,7 @@ class HiRadixCache(RadixCache):
         return nodes
 
     def offload_request(self, rid: str) -> Tuple[bool, str]:
-        """Offload a request's KV cache from GPU to host (CPU) memory.
+        """[AZ-HiCache-Pin] Offload a request's KV cache from GPU to host (CPU) memory.
 
         This does two things:
         1. Ensures the KV cache is backed up to DRAM (if not already).
@@ -1331,6 +1333,8 @@ class HiRadixCache(RadixCache):
         detail = "; ".join(parts) if parts else "no action needed"
 
         return True, f"Offload for request {rid}: {detail}."
+
+    # ---- [AZ-HiCache-Pin] End: pin/unpin/offload implementation ----
 
     def load_back(
         self, node: TreeNode, mem_quota: Optional[int] = None

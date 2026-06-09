@@ -333,7 +333,7 @@ class Envs:
     SGLANG_HICACHE_DECODE_OFFLOAD_STRIDE = EnvInt(None)
     SGLANG_HICACHE_FILE_BACKEND_STORAGE_DIR = EnvStr(None)
     SGLANG_HICACHE_NIXL_BACKEND_STORAGE_DIR = EnvStr(None)
-    # Enable verbose HiCache correctness logging ([HiCache-Pin] messages).
+    # [AZ-HiCache-Pin] Enable verbose HiCache correctness logging.
     # Off by default to avoid performance degradation in production.
     SGLANG_HICACHE_CORRECTNESS = EnvBool(False)
     # Staging buffer for heterogeneous TP KV transfer
