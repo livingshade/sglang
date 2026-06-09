@@ -230,6 +230,9 @@ class TreeNode:
         self.hash_value: Optional[List[str]] = None
         # priority for priority-aware eviction
         self.priority = priority
+        # request IDs whose token sequence ends at this node (leaf tracking)
+        # [AZ-HiCache-Pin] External addition for rid→leaf pin tracking
+        self.rids: Optional[set] = None
 
         self.id = TreeNode.counter if id is None else id
         TreeNode.counter += 1

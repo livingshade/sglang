@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import atexit
-import collections
 import heapq
 import json
 import logging
@@ -192,22 +191,21 @@ class HiRadixCache(RadixCache):
 
         self.evictable_host_leaves = set()
 
-        # ---- [AZ-HiCache-Pin] Begin: pin tracking data structures ----
-        # Pin tracking: store token IDs for recently completed requests so
-        # users can pin their host-resident KV cache via request ID.
-        self._MAX_COMPLETED_ENTRIES = 10000
-        self._completed_request_tokens: collections.OrderedDict[
-            str, Tuple[list, Optional[str]]
-        ] = collections.OrderedDict()
-        # Maps rid → (token_ids, extra_key, pinned_token_count) for currently
-        # pinned requests.  pinned_token_count records the *newly* pinned
-        # tokens attributed to this rid (nodes whose pin_count went from 0→1).
-        self._pinned_requests: Dict[str, Tuple[list, Optional[str], int]] = {}
+        # ---- [AZ-HiCache-Pin] Begin: rid→leaf pin tracking ----
+        # Maps rid → leaf TreeNode for completed requests whose KV cache
+        # nodes are still present in the radix tree.  Entries are cleaned
+        # up when the leaf node is fully evicted.
+        # No token_ids stored — walk up from the leaf to find host nodes.
+        self._rid_to_leaf: Dict[str, TreeNode] = {}
+        # Maps rid → (leaf_node, pinned_token_count) for currently pinned
+        # requests.  pinned_token_count records the *newly* pinned tokens
+        # attributed to this rid (nodes whose pin_count went from 0→1).
+        self._pinned_requests: Dict[str, Tuple[TreeNode, int]] = {}
         # Aggregate count of host token slots that are pinned (non-evictable).
         self._pinned_host_tokens: int = 0
         # Fraction of host pool that may be pinned before new pins are rejected.
         self._PIN_CAPACITY_RATIO = 0.9
-        # ---- [AZ-HiCache-Pin] End: pin tracking data structures ----
+        # ---- [AZ-HiCache-Pin] End: rid→leaf pin tracking ----
 
         super().__init__(params=params)
 
@@ -664,7 +662,7 @@ class HiRadixCache(RadixCache):
         self.prefetch_loaded_tokens_by_reqid.clear()
         self.evictable_host_leaves.clear()
         # [AZ-HiCache-Pin] Clear pin tracking
-        self._completed_request_tokens.clear()
+        self._rid_to_leaf.clear()
         self._pinned_requests.clear()
         self._pinned_host_tokens = 0
         super().reset()
@@ -971,6 +969,8 @@ class HiRadixCache(RadixCache):
         self._record_remove_event(node)
         self.cache_controller.mem_pool_device_allocator.free(node.value)
         num_evicted = len(node.value)
+        # [AZ-HiCache-Pin] Clean up rid tracking before deleting the leaf
+        self._cleanup_rids_on_node(node)
         self._delete_leaf(node)
         return num_evicted
 
@@ -1008,6 +1008,9 @@ class HiRadixCache(RadixCache):
             self._record_remove_event(x, medium=StorageMedium.CPU)
             num_evicted += self.cache_controller.evict_host(x.host_value)
 
+            # [AZ-HiCache-Pin] Clean up rid tracking before removing node from tree
+            self._cleanup_rids_on_node(x)
+
             key = x.key.child_key(self.page_size)
             v = x.parent.children.pop(key, None)
             assert v == x, f"parent does not have child key, {key}"
@@ -1022,123 +1025,106 @@ class HiRadixCache(RadixCache):
     # ---- [AZ-HiCache-Pin] Begin: pin/unpin/offload implementation ----
 
     def cache_finished_req(self, req, is_insert: bool = True):
-        """[AZ-HiCache-Pin] Override to record token IDs for completed requests."""
-        # Store token IDs before calling super (which releases the lock_ref)
+        """[AZ-HiCache-Pin] Override to track the leaf node for pin/unpin by rid."""
         from sglang.srt.managers.schedule_batch import Req
 
-        if isinstance(req, Req) and not self.disable:
-            kv_committed_len = len(req.origin_input_ids) + len(req.output_ids)
-            token_ids = (req.origin_input_ids + req.output_ids)[:kv_committed_len]
-            extra_key = getattr(req, "extra_key", None)
+        # Grab the leaf node BEFORE super() releases it via dec_lock_ref.
+        # req.last_node is the deepest node in the radix tree for this
+        # request's token sequence — set by the scheduler during insertion.
+        leaf = None
+        rid = None
+        if isinstance(req, Req) and not self.disable and req.last_node is not None:
+            leaf = req.last_node
             rid = req.rid
-
-            # Bounded storage: evict oldest entries
-            if len(self._completed_request_tokens) >= self._MAX_COMPLETED_ENTRIES:
-                evicted_rid, _ = self._completed_request_tokens.popitem(last=False)
-                if _HICACHE_CORRECTNESS:
-                    logger.info(
-                        "[HiCache-Pin] completion_buffer_evict rid=%s "
-                        "buffer_size=%d max=%d",
-                        evicted_rid,
-                        len(self._completed_request_tokens),
-                        self._MAX_COMPLETED_ENTRIES,
-                    )
-            self._completed_request_tokens[rid] = (list(token_ids), extra_key)
-            if _HICACHE_CORRECTNESS:
-                logger.info(
-                    "[HiCache-Pin] cache_finished_req rid=%s tokens=%d "
-                    "buffer_size=%d",
-                    rid, len(token_ids),
-                    len(self._completed_request_tokens),
-                )
 
         super().cache_finished_req(req, is_insert)
 
-    def _walk_host_path(
-        self, token_ids: list, extra_key: Optional[str]
-    ) -> Tuple[List[TreeNode], int, int]:
-        """[AZ-HiCache-Pin] Walk the radix tree for the given tokens and return host-resident nodes.
+        # After super, attach rid to the leaf for pin/unpin lookup.
+        if leaf is not None and rid is not None:
+            if leaf.rids is None:
+                leaf.rids = set()
+            leaf.rids.add(rid)
+            self._rid_to_leaf[rid] = leaf
+            if _HICACHE_CORRECTNESS:
+                logger.info(
+                    "[HiCache-Pin] cache_finished_req rid=%s "
+                    "leaf_node=%d tracker_size=%d",
+                    rid, leaf.id, len(self._rid_to_leaf),
+                )
 
-        Returns:
-            (host_nodes, matched_host_tokens, expected_tokens)
-            where matched_host_tokens is the total token coverage of returned
-            nodes and expected_tokens is the page-aligned length of the key.
+    def _cleanup_rids_on_node(self, node: TreeNode):
+        """[AZ-HiCache-Pin] Remove all rid references when a node is deleted from the tree."""
+        if node.rids:
+            for rid in node.rids:
+                self._rid_to_leaf.pop(rid, None)
+            node.rids = None
+
+    def _collect_host_path_up(
+        self, leaf: TreeNode,
+    ) -> Tuple[List[TreeNode], int]:
+        """[AZ-HiCache-Pin] Walk UP from leaf to root, collecting host-resident nodes.
+
+        Returns (host_nodes, total_host_tokens).
+        Nodes are returned in root-to-leaf order.
         """
-        radix_key = RadixKey(
-            token_ids, extra_key, is_bigram=self.is_eagle
-        ).page_aligned(self.page_size)
-
-        expected_tokens = len(radix_key)
-        if expected_tokens == 0:
-            return [], 0, 0
-
-        # Walk the tree following the key to find all nodes along the path
-        node = self.root_node
-        child_key = radix_key.child_key(self.page_size)
         host_nodes = []
-        matched_host_tokens = 0
+        total_host_tokens = 0
+        node = leaf
+        while node is not None and node is not self.root_node:
+            if node.backuped:
+                host_nodes.append(node)
+                total_host_tokens += len(node.host_value)
+            node = node.parent
+        host_nodes.reverse()  # root-to-leaf order
+        return host_nodes, total_host_tokens
 
-        while len(radix_key) > 0 and child_key in node.children:
-            child = node.children[child_key]
-            prefix_len = child.key.match(radix_key, page_size=self.page_size)
+    def _collect_all_path_up(
+        self, leaf: TreeNode,
+    ) -> List[TreeNode]:
+        """[AZ-HiCache-Pin] Walk UP from leaf to root, collecting all nodes (GPU or host).
 
-            if child.backuped:
-                host_nodes.append(child)
-                matched_host_tokens += len(child.host_value)
-
-            if prefix_len < len(child.key):
-                # Partial match — stop here
-                break
-
-            node = child
-            radix_key = radix_key[prefix_len:]
-            if len(radix_key) > 0:
-                child_key = radix_key.child_key(self.page_size)
-
-        return host_nodes, matched_host_tokens, expected_tokens
+        Returns nodes in root-to-leaf order.
+        """
+        nodes = []
+        node = leaf
+        while node is not None and node is not self.root_node:
+            nodes.append(node)
+            node = node.parent
+        nodes.reverse()
+        return nodes
 
     def pin_host_cache(self, rid: str) -> Tuple[bool, str]:
         """[AZ-HiCache-Pin] Pin a request's KV cache blocks in host (CPU) memory.
 
         Returns (success, message).
         """
-        # Check if already pinned
         if rid in self._pinned_requests:
             if _HICACHE_CORRECTNESS:
                 logger.info("[HiCache-Pin] pin_already rid=%s", rid)
             return True, f"Request {rid} is already pinned."
 
-        # Look up stored token IDs
-        if rid not in self._completed_request_tokens:
+        if rid not in self._rid_to_leaf:
             if _HICACHE_CORRECTNESS:
                 logger.info("[HiCache-Pin] pin_not_found rid=%s", rid)
             return False, (
-                f"Request {rid} not found. Either the request ID is invalid, "
-                f"or it has expired from the completion buffer "
-                f"(max {self._MAX_COMPLETED_ENTRIES} entries)."
+                f"Request {rid} not found. The request ID may be invalid, "
+                f"or its cache has been fully evicted."
             )
 
-        token_ids, extra_key = self._completed_request_tokens[rid]
-        host_nodes, matched_tokens, expected_tokens = self._walk_host_path(
-            token_ids, extra_key
-        )
+        leaf = self._rid_to_leaf[rid]
+        host_nodes, matched_tokens = self._collect_host_path_up(leaf)
 
         if not host_nodes:
             if _HICACHE_CORRECTNESS:
                 logger.info(
-                    "[HiCache-Pin] pin_no_host_nodes rid=%s "
-                    "matched=%d expected=%d",
-                    rid, matched_tokens, expected_tokens,
+                    "[HiCache-Pin] pin_no_host_nodes rid=%s matched=%d",
+                    rid, matched_tokens,
                 )
             return False, (
                 f"No host-resident KV cache found for request {rid}. "
                 f"The cache may not have been offloaded to CPU yet, "
                 f"or it was already evicted from host memory."
             )
-
-        # Note: matched_tokens < expected_tokens is normal when some nodes
-        # are still GPU-resident and haven't been backed up to host yet.
-        # We pin whatever host-resident nodes exist.
 
         # Capacity check: count only tokens from nodes not already pinned
         new_pinned_tokens = sum(
@@ -1169,9 +1155,9 @@ class HiRadixCache(RadixCache):
             pinned_tokens += len(node.host_value)
 
         self._pinned_host_tokens += new_pinned_tokens
-        # Move from completed buffer to pinned tracking (store token count)
-        self._pinned_requests[rid] = (token_ids, extra_key, new_pinned_tokens)
-        self._completed_request_tokens.pop(rid, None)
+        # Move from completed tracker to pinned tracking
+        self._pinned_requests[rid] = (leaf, new_pinned_tokens)
+        self._rid_to_leaf.pop(rid, None)
 
         if _HICACHE_CORRECTNESS:
             logger.info(
@@ -1196,10 +1182,8 @@ class HiRadixCache(RadixCache):
                 logger.info("[HiCache-Pin] unpin_not_pinned rid=%s", rid)
             return False, f"Request {rid} is not pinned."
 
-        token_ids, extra_key, attributed_tokens = self._pinned_requests[rid]
-        host_nodes, _matched, _expected = self._walk_host_path(
-            token_ids, extra_key
-        )
+        leaf, attributed_tokens = self._pinned_requests[rid]
+        host_nodes, _ = self._collect_host_path_up(leaf)
 
         unpinned_tokens = 0
         for node in host_nodes:
@@ -1207,7 +1191,6 @@ class HiRadixCache(RadixCache):
                 node.pin_count -= 1
                 unpinned_tokens += len(node.host_value)
 
-        # Use the stored attributed count for deterministic accounting
         self._pinned_host_tokens = max(
             0, self._pinned_host_tokens - attributed_tokens
         )
@@ -1235,36 +1218,6 @@ class HiRadixCache(RadixCache):
             total_host,
         )
 
-    def _walk_all_nodes(
-        self, token_ids: list, extra_key: Optional[str]
-    ) -> List[TreeNode]:
-        """[AZ-HiCache-Pin] Walk the radix tree for the given tokens and return all matched nodes."""
-        radix_key = RadixKey(
-            token_ids, extra_key, is_bigram=self.is_eagle
-        ).page_aligned(self.page_size)
-
-        if len(radix_key) == 0:
-            return []
-
-        node = self.root_node
-        child_key = radix_key.child_key(self.page_size)
-        nodes = []
-
-        while len(radix_key) > 0 and child_key in node.children:
-            child = node.children[child_key]
-            prefix_len = child.key.match(radix_key, page_size=self.page_size)
-            nodes.append(child)
-
-            if prefix_len < len(child.key):
-                break
-
-            node = child
-            radix_key = radix_key[prefix_len:]
-            if len(radix_key) > 0:
-                child_key = radix_key.child_key(self.page_size)
-
-        return nodes
-
     def offload_request(self, rid: str) -> Tuple[bool, str]:
         """[AZ-HiCache-Pin] Offload a request's KV cache from GPU to host (CPU) memory.
 
@@ -1275,20 +1228,20 @@ class HiRadixCache(RadixCache):
 
         Returns (success, message).
         """
-        # Look up token IDs from completed or pinned requests
-        if rid in self._completed_request_tokens:
-            token_ids, extra_key = self._completed_request_tokens[rid]
+        # Look up leaf node from completed or pinned requests
+        if rid in self._rid_to_leaf:
+            leaf = self._rid_to_leaf[rid]
         elif rid in self._pinned_requests:
-            token_ids, extra_key, _pinned_count = self._pinned_requests[rid]
+            leaf, _pinned_count = self._pinned_requests[rid]
         else:
             return False, (
-                f"Request {rid} not found. Either the request ID is invalid, "
-                f"or it has expired from the completion buffer "
-                f"(max {self._MAX_COMPLETED_ENTRIES} entries)."
+                f"Request {rid} not found. The request ID may be invalid, "
+                f"or its cache has been fully evicted."
             )
 
-        all_nodes = self._walk_all_nodes(token_ids, extra_key)
+        all_nodes = self._collect_all_path_up(leaf)
         if not all_nodes:
+            self._rid_to_leaf.pop(rid, None)
             return False, f"No cache nodes found for request {rid}."
 
         backed_up = 0
