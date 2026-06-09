@@ -1028,29 +1028,23 @@ class HiRadixCache(RadixCache):
         """[AZ-HiCache-Pin] Override to track the leaf node for pin/unpin by rid."""
         from sglang.srt.managers.schedule_batch import Req
 
-        # Grab the leaf node BEFORE super() releases it via dec_lock_ref.
-        # req.last_node is the deepest node in the radix tree for this
-        # request's token sequence — set by the scheduler during insertion.
-        leaf = None
-        rid = None
-        if isinstance(req, Req) and not self.disable and req.last_node is not None:
-            leaf = req.last_node
-            rid = req.rid
-
         super().cache_finished_req(req, is_insert)
 
-        # After super, attach rid to the leaf for pin/unpin lookup.
-        if leaf is not None and rid is not None:
-            if leaf.rids is None:
-                leaf.rids = set()
-            leaf.rids.add(rid)
-            self._rid_to_leaf[rid] = leaf
-            if _HICACHE_CORRECTNESS:
-                logger.info(
-                    "[HiCache-Pin] cache_finished_req rid=%s "
-                    "leaf_node=%d tracker_size=%d",
-                    rid, leaf.id, len(self._rid_to_leaf),
-                )
+        # After super, read the leaf node it stored during insert.
+        if isinstance(req, Req) and not self.disable:
+            leaf = getattr(req, "_inserted_leaf_node", None)
+            rid = req.rid
+            if leaf is not None and leaf is not self.root_node:
+                if leaf.rids is None:
+                    leaf.rids = set()
+                leaf.rids.add(rid)
+                self._rid_to_leaf[rid] = leaf
+                if _HICACHE_CORRECTNESS:
+                    logger.info(
+                        "[HiCache-Pin] cache_finished_req rid=%s "
+                        "leaf_node=%d tracker_size=%d",
+                        rid, leaf.id, len(self._rid_to_leaf),
+                    )
 
     def _cleanup_rids_on_node(self, node: TreeNode):
         """[AZ-HiCache-Pin] Remove all rid references when a node is deleted from the tree."""
@@ -1787,7 +1781,8 @@ class HiRadixCache(RadixCache):
             value = value[: len(key)]
 
         if len(key) == 0:
-            return InsertResult(prefix_len=0)
+            # [AZ-HiCache-Pin] Return root as leaf for empty key
+            return InsertResult(prefix_len=0, last_node=self.root_node)
 
         node = self.root_node
         child_key = key.child_key(self.page_size)
@@ -1854,7 +1849,9 @@ class HiRadixCache(RadixCache):
 
             if self.cache_controller.write_policy != "write_back":
                 self._inc_hit_count(new_node, chunked)
-        return InsertResult(prefix_len=total_prefix_length)
+            node = new_node
+        # [AZ-HiCache-Pin] Return leaf node for rid tracking
+        return InsertResult(prefix_len=total_prefix_length, last_node=node)
 
     def release_aborted_request(self, rid: str):
         # Clean up storage hit tracking for aborted request

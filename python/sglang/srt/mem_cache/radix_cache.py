@@ -440,8 +440,9 @@ class RadixCache(KVCacheEventMixin, BasePrefixCache):
             # Debug/test fallback: use token ids themselves as values.
             value = torch.tensor(key.token_ids[: len(key)], dtype=torch.int64)
 
-        prefix_len = self._insert_helper(self.root_node, key, value, priority, chunked)
-        return InsertResult(prefix_len=prefix_len)
+        # [AZ-HiCache-Pin] _insert_helper returns (prefix_len, leaf_node)
+        prefix_len, leaf_node = self._insert_helper(self.root_node, key, value, priority, chunked)
+        return InsertResult(prefix_len=prefix_len, last_node=leaf_node)
 
     def cache_finished_req(self, req: Req, is_insert: bool = True):
         """Cache request when it finishes."""
@@ -478,6 +479,8 @@ class RadixCache(KVCacheEventMixin, BasePrefixCache):
             self.token_to_kv_pool_allocator.free(
                 kv_indices[req.cache_protected_len : result.prefix_len]
             )
+            # [AZ-HiCache-Pin] Store the inserted leaf node for subclass access
+            req._inserted_leaf_node = result.last_node
         else:
             self.token_to_kv_pool_allocator.free(
                 kv_indices[req.cache_protected_len : key_len]
@@ -720,7 +723,8 @@ class RadixCache(KVCacheEventMixin, BasePrefixCache):
         # Update priority along the path (take max to propagate higher priority)
         node.priority = max(node.priority, priority)
         if len(key) == 0:
-            return 0
+            # [AZ-HiCache-Pin] Return (prefix_len, leaf_node)
+            return 0, node
 
         child_key = key.child_key(self.page_size)
 
@@ -756,7 +760,9 @@ class RadixCache(KVCacheEventMixin, BasePrefixCache):
             self._update_leaf_status(new_node)
             # Hash will be computed lazily during event emission
             self._record_store_event(new_node)
-        return total_prefix_length
+            node = new_node
+        # [AZ-HiCache-Pin] Return (prefix_len, leaf_node)
+        return total_prefix_length, node
 
     def _print_helper(self, node: TreeNode, indent: int):
         """Prints the radix tree in a human-readable format."""

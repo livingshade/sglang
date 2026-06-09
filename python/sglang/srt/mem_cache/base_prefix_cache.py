@@ -76,6 +76,8 @@ class InsertResult:
     prefix_len: int
     mamba_exist: bool = False
     inserted_host_node: Any = None
+    # [AZ-HiCache-Pin] The leaf node at the end of the inserted path
+    last_node: Any = None
 
 
 @dataclasses.dataclass
