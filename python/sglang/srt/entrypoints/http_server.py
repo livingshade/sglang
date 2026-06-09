@@ -957,11 +957,15 @@ async def hicache_storage_backend_status():
 @app.api_route("/hicache/pin", methods=["POST"])
 @auth_level(AuthLevel.ADMIN_OPTIONAL)
 async def pin_hicache_host_cache(request: Request):
-    """Pin a request's KV cache in host (CPU) memory to prevent eviction.
+    """Best-effort pin of a request's KV cache in host (CPU) memory.
 
-    The request ID (rid) must correspond to a recently completed request.
-    Once pinned, the host-resident KV cache blocks will not be evicted
-    until explicitly unpinned via POST /hicache/unpin.
+    Attempts to prevent host-tier eviction for the given request ID.
+    Not guaranteed — the cache may have been partially or fully evicted
+    before this call, tree splits may reduce coverage, and shared prefix
+    nodes are ref-counted across multiple pins.
+
+    The request ID (rid) must correspond to a completed request whose
+    cache is still tracked by the server.
     """
     body = await request.json()
     rid = body.get("rid")
@@ -982,7 +986,11 @@ async def pin_hicache_host_cache(request: Request):
 @app.api_route("/hicache/unpin", methods=["POST"])
 @auth_level(AuthLevel.ADMIN_OPTIONAL)
 async def unpin_hicache_host_cache(request: Request):
-    """Unpin a request's KV cache in host (CPU) memory, allowing eviction.
+    """Best-effort unpin of a request's KV cache in host (CPU) memory.
+
+    Releases pin protection so the cache becomes eligible for eviction.
+    Best-effort: nodes that were evicted or split since pinning are
+    silently skipped; shared prefix nodes may remain pinned by other rids.
 
     The request ID (rid) must correspond to a currently pinned request.
     """
@@ -1019,10 +1027,12 @@ async def list_pinned_hicache():
 @app.api_route("/hicache/offload", methods=["POST"])
 @auth_level(AuthLevel.ADMIN_OPTIONAL)
 async def offload_hicache_request(request: Request):
-    """Offload a request's KV cache from GPU to host (CPU) memory.
+    """Best-effort offload of a request's KV cache from GPU to host memory.
 
-    Ensures the KV cache is backed up to DRAM and marks the GPU-resident
-    blocks for priority eviction (evicted first when GPU memory is needed).
+    Attempts to back up to DRAM and mark GPU blocks for priority eviction.
+    Best-effort: the cache may have already been evicted, and offloading
+    alone does not prevent host eviction — call /hicache/pin after offload
+    to protect the host-resident copy.
     """
     body = await request.json()
     rid = body.get("rid")

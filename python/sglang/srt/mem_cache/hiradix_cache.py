@@ -192,13 +192,17 @@ class HiRadixCache(RadixCache):
         self.evictable_host_leaves = set()
 
         # ---- [AZ-HiCache-Pin] Begin: rid→leaf pin tracking ----
-        # Maps rid → leaf TreeNode for completed requests whose KV cache
-        # nodes are still present in the radix tree.  Entries are cleaned
-        # up when the leaf node is fully evicted.
-        # No token_ids stored — walk up from the leaf to find host nodes.
+        # Best-effort tracking: maps rid → leaf TreeNode for completed
+        # requests whose KV cache is still in the radix tree.  Not
+        # guaranteed — the leaf may become stale after tree splits or
+        # eviction.  Entries are cleaned up lazily when the leaf node
+        # is fully evicted from the tree.
         self._rid_to_leaf: Dict[str, TreeNode] = {}
-        # Maps rid → (leaf_node, pinned_token_count) for currently pinned
-        # requests.  pinned_token_count records the *newly* pinned tokens
+        # Best-effort pinning: maps rid → (leaf_node, pinned_token_count)
+        # for currently pinned requests.  Pin protection is best-effort:
+        # tree splits may create new nodes not covered by the original
+        # pin, and shared prefix nodes may be unpinned by another rid's
+        # unpin.  pinned_token_count records the *newly* pinned tokens
         # attributed to this rid (nodes whose pin_count went from 0→1).
         self._pinned_requests: Dict[str, Tuple[TreeNode, int]] = {}
         # Aggregate count of host token slots that are pinned (non-evictable).
@@ -1025,7 +1029,13 @@ class HiRadixCache(RadixCache):
     # ---- [AZ-HiCache-Pin] Begin: pin/unpin/offload implementation ----
 
     def cache_finished_req(self, req, is_insert: bool = True):
-        """[AZ-HiCache-Pin] Override to track the leaf node for pin/unpin by rid."""
+        """[AZ-HiCache-Pin] Override to track the leaf node for pin/unpin by rid.
+
+        Best-effort: the leaf reference may become stale if the tree is
+        restructured (splits, eviction) before pin is called.  The rid
+        is only tracked when is_insert=True and insert returns a valid
+        (non-root) leaf node.
+        """
         from sglang.srt.managers.schedule_batch import Req
 
         super().cache_finished_req(req, is_insert)
@@ -1088,7 +1098,18 @@ class HiRadixCache(RadixCache):
         return nodes
 
     def pin_host_cache(self, rid: str) -> Tuple[bool, str]:
-        """[AZ-HiCache-Pin] Pin a request's KV cache blocks in host (CPU) memory.
+        """[AZ-HiCache-Pin] Best-effort pin of a request's host KV cache.
+
+        Attempts to prevent host eviction of the KV cache blocks for
+        the given request ID.  This is a best-effort operation:
+
+        - The rid must still be tracked (not evicted since completion).
+        - Only host-resident nodes found at pin time are protected.
+        - Tree splits after pinning may create new nodes not covered.
+        - Shared prefix nodes are ref-counted; another rid's unpin
+          may reduce coverage.
+        - The cache may have been partially or fully evicted before
+          this call arrives.
 
         Returns (success, message).
         """
@@ -1167,7 +1188,17 @@ class HiRadixCache(RadixCache):
         )
 
     def unpin_host_cache(self, rid: str) -> Tuple[bool, str]:
-        """[AZ-HiCache-Pin] Unpin a request's KV cache blocks in host (CPU) memory.
+        """[AZ-HiCache-Pin] Best-effort unpin of a request's host KV cache.
+
+        Releases pin protection on host-resident nodes for the given
+        request ID.  This is a best-effort operation:
+
+        - Only nodes still host-resident are unpinned; nodes that were
+          evicted or split since pinning are silently skipped.
+        - Shared prefix nodes have their pin_count decremented, but
+          may remain pinned if other rids also pin them.
+        - Token accounting uses the attributed count from pin time,
+          which may differ from actual current state after splits.
 
         Returns (success, message).
         """
@@ -1213,11 +1244,17 @@ class HiRadixCache(RadixCache):
         )
 
     def offload_request(self, rid: str) -> Tuple[bool, str]:
-        """[AZ-HiCache-Pin] Offload a request's KV cache from GPU to host (CPU) memory.
+        """[AZ-HiCache-Pin] Best-effort offload of a request's KV cache to host.
 
-        This does two things:
-        1. Ensures the KV cache is backed up to DRAM (if not already).
-        2. Marks the GPU-resident nodes for priority eviction so they are
+        Attempts to ensure the KV cache is backed up to DRAM and marks
+        GPU-resident nodes for priority eviction.  This is best-effort:
+
+        - Only nodes still in the tree at call time are processed.
+        - GPU nodes may have already been evicted before this call.
+        - The write_backup is synchronous but the actual GPU eviction
+          happens later when memory pressure triggers it.
+        - Does not guarantee the cache will remain on host — use pin
+          after offload to prevent host eviction.
            evicted first when GPU memory is needed.
 
         Returns (success, message).
