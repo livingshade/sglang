@@ -39,7 +39,8 @@ from sglang.srt.mem_cache.utils import (
 if TYPE_CHECKING:
     from sglang.srt.lora.lora_registry import LoRARef
 
-# LoRARef.lora_id is a uuid4 or uuid5 hex string.
+# Length of LoRARef.lora_id, a uuid4 or uuid5 hex string. Req adds the id to the
+# end of extra_key, so the last 32 characters of extra_key are the id.
 _LORA_ID_LEN = 32
 
 
@@ -74,7 +75,6 @@ class LoRANameTable:
         return table
 
     def register(self, *, lora_id: str, lora_name: str) -> None:
-        assert len(lora_id) == _LORA_ID_LEN, lora_id
         self._names[lora_id] = lora_name
 
     def resolve(self, extra_key: Optional[str]) -> Optional[str]:
