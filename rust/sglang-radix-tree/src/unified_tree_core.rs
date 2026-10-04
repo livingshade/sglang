@@ -527,6 +527,8 @@ pub struct CacheInitParams {
     pub has_swa_host_pool: bool,
     /// Whether tree mutations emit BlockStored/BlockRemoved events.
     pub enable_kv_cache_events: bool,
+    /// Whether events also carry the storage-chain (namespaced) hashes.
+    pub emit_namespaced_kv_hashes: bool,
     /// Chunk alignment for the mamba branching seqlen; None when Mamba is disabled.
     pub mamba_cache_chunk_size: Option<usize>,
     /// Per-root-path cap on cached Mamba states; None means unlimited.
@@ -549,6 +551,7 @@ impl Default for CacheInitParams {
             swa_req_ring: false,
             has_swa_host_pool: false,
             enable_kv_cache_events: false,
+            emit_namespaced_kv_hashes: false,
             mamba_cache_chunk_size: None,
             mamba_max_states_per_path: None,
         }
@@ -618,6 +621,8 @@ pub struct UnifiedTreeCore<K: ChildKeyType> {
     pub(crate) has_swa_host_pool: bool,
     /// Whether tree mutations emit BlockStored/BlockRemoved events.
     pub(crate) enable_kv_cache_events: bool,
+    /// Whether events also carry the storage-chain (namespaced) hashes.
+    pub(crate) emit_namespaced_kv_hashes: bool,
     /// Queued placement events, drained by take_events.
     pub(crate) kv_event_queue: Vec<KvCacheEvent<K::Atom>>,
     /// Namespaced event hashes, seeded only by cache_salt; events omit extra_key.
@@ -811,6 +816,7 @@ impl<K: ChildKeyType> UnifiedTreeCore<K> {
             enable_external_cache_linker: false,
             has_swa_host_pool: params.has_swa_host_pool,
             enable_kv_cache_events: params.enable_kv_cache_events,
+            emit_namespaced_kv_hashes: params.emit_namespaced_kv_hashes,
             kv_event_queue: Vec::new(),
             namespaced_event_hashes: HashMap::new(),
             write_through_threshold: params.write_through_threshold,
@@ -3151,12 +3157,23 @@ impl<K: ChildKeyType> UnifiedTreeCore<K> {
                 Some(KvCacheEvent::BlockRemoved {
                     block_hashes: tail_hashes,
                     medium: tail_medium,
+                    namespaced_block_hashes: tail_namespaced,
                 }),
                 KvCacheEvent::BlockRemoved {
                     mut block_hashes,
                     medium,
+                    namespaced_block_hashes,
                 },
-            ) if *tail_medium == medium => tail_hashes.append(&mut block_hashes),
+            ) if *tail_medium == medium
+                && tail_namespaced.is_some() == namespaced_block_hashes.is_some() =>
+            {
+                tail_hashes.append(&mut block_hashes);
+                if let (Some(tail_namespaced), Some(mut namespaced)) =
+                    (tail_namespaced.as_mut(), namespaced_block_hashes)
+                {
+                    tail_namespaced.append(&mut namespaced);
+                }
+            }
             (
                 Some(KvCacheEvent::BlockStored {
                     block_hashes: tail_hashes,
@@ -3165,6 +3182,8 @@ impl<K: ChildKeyType> UnifiedTreeCore<K> {
                     medium: tail_medium,
                     cache_salt: tail_cache_salt,
                     session_id: tail_session_id,
+                    extra_key: tail_extra_key,
+                    namespaced_block_hashes: tail_namespaced,
                     ..
                 }),
                 KvCacheEvent::BlockStored {
@@ -3175,16 +3194,33 @@ impl<K: ChildKeyType> UnifiedTreeCore<K> {
                     medium,
                     cache_salt,
                     session_id,
+                    extra_key,
+                    namespaced_block_hashes,
+                    namespaced_parent_block_hash,
                 },
             ) if *tail_medium == medium
                 && *tail_block_size == block_size
                 && *tail_cache_salt == cache_salt
                 && *tail_session_id == session_id
+                && *tail_extra_key == extra_key
                 && !tail_hashes.is_empty()
-                && parent_block_hash == tail_hashes.last().copied() =>
+                && parent_block_hash == tail_hashes.last().copied()
+                && match (tail_namespaced.as_ref(), namespaced_block_hashes.as_ref()) {
+                    (None, None) => true,
+                    (Some(tail_namespaced), Some(_)) => {
+                        !tail_namespaced.is_empty()
+                            && namespaced_parent_block_hash == tail_namespaced.last().copied()
+                    }
+                    _ => false,
+                } =>
             {
                 tail_hashes.append(&mut block_hashes);
                 tail_token_ids.append(&mut token_ids);
+                if let (Some(tail_namespaced), Some(mut namespaced)) =
+                    (tail_namespaced.as_mut(), namespaced_block_hashes)
+                {
+                    tail_namespaced.append(&mut namespaced);
+                }
             }
             (_, event) => self.kv_event_queue.push(event),
         }
@@ -3260,13 +3296,22 @@ impl<K: ChildKeyType> UnifiedTreeCore<K> {
             self.arena.node_mut(node_id).hash_value = Some(hash_values);
         }
         let cache_salt = self.arena.node(node_id).namespace.cache_salt_arc();
+        let extra_key = self.arena.node(node_id).namespace.extra_key_arc();
         let session_id: Option<Arc<str>> = session_id.map(Arc::from);
         let namespaced = self.arena.node(node_id).namespace != KeyNamespace::default();
         if namespaced {
             self.ensure_namespaced_event_hashes_(node_id);
         }
+        let emit_namespaced = self.emit_namespaced_kv_hashes;
         let events = {
             let node = self.arena.node(node_id);
+            let storage_hashes = node.hash_value.as_ref().expect("hashed above");
+            let mut namespaced_parent_block_hash = if emit_namespaced {
+                self.storage_parent_block_hash_(node_id)
+            } else {
+                None
+            };
+            let mut storage_page_hashes = storage_hashes.iter();
             let mut parent_block_hash = node.parent.and_then(|parent_id| {
                 let parent = self.arena.node(parent_id);
                 if namespaced {
@@ -3283,6 +3328,13 @@ impl<K: ChildKeyType> UnifiedTreeCore<K> {
             let num_pages = node.key.atom_len().div_ceil(self.page_size);
             let mut events = Vec::with_capacity(num_pages);
             let mut append_event = |page: &[K::Atom], block_hash| {
+                let namespaced_block_hash = emit_namespaced.then(|| {
+                    crate::node::hash_str_to_int64(
+                        storage_page_hashes
+                            .next()
+                            .expect("one storage hash per page"),
+                    )
+                });
                 events.push(KvCacheEvent::BlockStored {
                     block_hashes: vec![block_hash],
                     parent_block_hash,
@@ -3291,8 +3343,14 @@ impl<K: ChildKeyType> UnifiedTreeCore<K> {
                     medium,
                     cache_salt: cache_salt.clone(),
                     session_id: session_id.clone(),
+                    extra_key: extra_key.clone(),
+                    namespaced_block_hashes: namespaced_block_hash.map(|hash| vec![hash]),
+                    namespaced_parent_block_hash,
                 });
                 parent_block_hash = Some(block_hash);
+                if emit_namespaced {
+                    namespaced_parent_block_hash = namespaced_block_hash;
+                }
             };
             if namespaced {
                 let hashes = &self.namespaced_event_hashes[&node.id];
@@ -3305,13 +3363,12 @@ impl<K: ChildKeyType> UnifiedTreeCore<K> {
                     append_event(page, crate::node::hash_digest_to_int64(digest));
                 }
             } else {
-                let hashes = node.hash_value.as_ref().expect("hashed above");
                 assert!(
-                    hashes.len() >= num_pages,
+                    storage_hashes.len() >= num_pages,
                     "store event: {} page hashes for {num_pages} pages",
-                    hashes.len()
+                    storage_hashes.len()
                 );
-                for (page, hash) in node.key.as_ref().chunks(self.page_size).zip(hashes) {
+                for (page, hash) in node.key.as_ref().chunks(self.page_size).zip(storage_hashes) {
                     append_event(page, crate::node::hash_str_to_int64(hash));
                 }
             }
@@ -3337,13 +3394,20 @@ impl<K: ChildKeyType> UnifiedTreeCore<K> {
         }
         let node = self.arena.node(node_id);
         let num_pages = node.key.atom_len().div_ceil(self.page_size);
+        let storage_hashes = node.hash_value.as_ref().expect("hashed above");
+        let namespaced_block_hashes = self.emit_namespaced_kv_hashes.then(|| {
+            storage_hashes[..num_pages]
+                .iter()
+                .map(|hash| crate::node::hash_str_to_int64(hash))
+                .collect()
+        });
         let block_hashes: Vec<i64> = if namespaced {
             self.namespaced_event_hashes[&node.id][..num_pages]
                 .iter()
                 .map(crate::node::hash_digest_to_int64)
                 .collect()
         } else {
-            node.hash_value.as_ref().expect("hashed above")[..num_pages]
+            storage_hashes[..num_pages]
                 .iter()
                 .map(|hash| crate::node::hash_str_to_int64(hash))
                 .collect()
@@ -3352,8 +3416,21 @@ impl<K: ChildKeyType> UnifiedTreeCore<K> {
             self.enqueue_kv_event_(KvCacheEvent::BlockRemoved {
                 block_hashes,
                 medium,
+                namespaced_block_hashes,
             });
         }
+    }
+
+    /// The storage-chain link of `node_id`'s first page; mirrors the parent rule
+    /// of `compute_node_hash_values`, so it is the hash the node's chain continues.
+    fn storage_parent_block_hash_(&self, node_id: NodeIdx_) -> Option<i64> {
+        let parent = self.arena.node(self.arena.node(node_id).try_parent()?);
+        if parent.key.atom_len() == 0 {
+            return None;
+        }
+        parent
+            .get_last_hash_value()
+            .map(crate::node::hash_str_to_int64)
     }
 
     /// Queue the all-cleared marker.
@@ -5659,10 +5736,16 @@ pub enum KvCacheEvent<A> {
         medium: StorageMedium,
         cache_salt: Option<Arc<str>>,
         session_id: Option<Arc<str>>,
+        /// Not published; Python resolves the LoRA adapter name from it.
+        extra_key: Option<Arc<str>>,
+        /// Storage-chain hashes; Some only with emit_namespaced_kv_hashes.
+        namespaced_block_hashes: Option<Vec<i64>>,
+        namespaced_parent_block_hash: Option<i64>,
     },
     BlockRemoved {
         block_hashes: Vec<i64>,
         medium: StorageMedium,
+        namespaced_block_hashes: Option<Vec<i64>>,
     },
     AllBlocksCleared,
 }

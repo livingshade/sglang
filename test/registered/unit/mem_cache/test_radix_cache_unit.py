@@ -44,7 +44,7 @@ from sglang.srt.mem_cache.base_prefix_cache import (
     InsertParams,
     MatchPrefixParams,
 )
-from sglang.srt.mem_cache.events import KVCacheEventRecorder
+from sglang.srt.mem_cache.events import KVCacheEventRecorder, LoRANameTable
 from sglang.srt.mem_cache.radix_cache import RadixCache, RadixKey, TreeNode
 from sglang.srt.utils import get_device
 from sglang.test.test_utils import CustomTestCase
@@ -64,6 +64,9 @@ class TestKVCacheEventQueue(unittest.TestCase):
         lora_id: int | None = None,
         cache_salt: str | None = None,
         session_id: str | None = None,
+        lora_name: str | None = None,
+        namespaced_parent_block_hash: int | None = None,
+        namespaced: bool = False,
     ) -> BlockStored:
         return BlockStored(
             block_hashes=[block_hash],
@@ -74,6 +77,9 @@ class TestKVCacheEventQueue(unittest.TestCase):
             medium=medium,
             cache_salt=cache_salt,
             session_id=session_id,
+            lora_name=lora_name,
+            namespaced_block_hashes=[block_hash + 100] if namespaced else None,
+            namespaced_parent_block_hash=namespaced_parent_block_hash,
         )
 
     def test_enqueue_coalesces_compatible_stores(self):
@@ -131,6 +137,53 @@ class TestKVCacheEventQueue(unittest.TestCase):
         queue.enqueue(self._store(1, None, session_id="session-a"))
         queue.enqueue(self._store(2, 1, session_id="session-b"))
         self.assertEqual(len(queue.take()), 2)
+
+        queue = KVCacheEventRecorder(enabled=True, page_size=DEFAULT_PAGE_SIZE)
+        queue.enqueue(self._store(1, None, lora_name="adapter-a"))
+        queue.enqueue(self._store(2, 1, lora_name="adapter-b"))
+        self.assertEqual(len(queue.take()), 2)
+
+        # Block hashes link up but the namespaced chain does not, as when two
+        # adapters cache the same tokens.
+        queue = KVCacheEventRecorder(enabled=True, page_size=DEFAULT_PAGE_SIZE)
+        queue.enqueue(self._store(1, None, namespaced=True))
+        queue.enqueue(self._store(2, 1, namespaced=True, namespaced_parent_block_hash=7))
+        self.assertEqual(len(queue.take()), 2)
+
+    def test_enqueue_coalesces_namespaced_chains(self):
+        queue = KVCacheEventRecorder(enabled=True, page_size=DEFAULT_PAGE_SIZE)
+        queue.enqueue(self._store(1, None, namespaced=True))
+        queue.enqueue(
+            self._store(2, 1, namespaced=True, namespaced_parent_block_hash=101)
+        )
+        queue.enqueue(
+            BlockRemoved(
+                block_hashes=[1], medium=StorageMedium.GPU, namespaced_block_hashes=[101]
+            )
+        )
+        queue.enqueue(
+            BlockRemoved(
+                block_hashes=[2], medium=StorageMedium.GPU, namespaced_block_hashes=[102]
+            )
+        )
+
+        stored, removed = queue.take()
+        self.assertEqual(stored.block_hashes, [1, 2])
+        self.assertEqual(stored.namespaced_block_hashes, [101, 102])
+        self.assertEqual(removed.namespaced_block_hashes, [101, 102])
+
+
+class TestLoRANameTable(unittest.TestCase):
+    def test_resolves_the_lora_id_suffix_of_extra_key(self):
+        lora_id = "0123456789abcdef0123456789abcdef"
+        table = LoRANameTable()
+        table.register(lora_id=lora_id, lora_name="adapter-a")
+
+        self.assertEqual(table.resolve(lora_id), "adapter-a")
+        # Req appends lora_id to a caller-provided extra_key.
+        self.assertEqual(table.resolve("tenant-" + lora_id), "adapter-a")
+        self.assertIsNone(table.resolve("tenant-" + "f" * 32))
+        self.assertIsNone(table.resolve(None))
 
 
 class TestRadixKey(unittest.TestCase):
@@ -749,6 +802,72 @@ class TestRadixCache(CustomTestCase):
                 )
             self.assertEqual(published[0], published[1])
             self.assertIsNotNone(published[1][-1][0])
+
+    def test_namespaced_hashes_separate_lora_blocks_from_base_blocks(self):
+        """Consumers keyed by block hash must tell an adapter's blocks from the
+        base model's, which share block_hashes for identical tokens."""
+        lora_id = "0123456789abcdef0123456789abcdef"
+        lora_names = LoRANameTable()
+        lora_names.register(lora_id=lora_id, lora_name="adapter-a")
+        tokens = [1, 2, 3, 4]
+
+        published = {}
+        for emit_namespaced_kv_hashes in (False, True):
+            cache = RadixCache.create_simulated(
+                page_size=2,
+                enable_kv_cache_events=True,
+                emit_namespaced_kv_hashes=emit_namespaced_kv_hashes,
+                kv_event_lora_names=lora_names,
+            )
+            for extra_key in (None, lora_id):
+                cache.insert(
+                    InsertParams(
+                        key=RadixKey(array("q", tokens), extra_key=extra_key),
+                        value=torch.tensor(tokens, dtype=torch.int64),
+                    )
+                )
+            published[emit_namespaced_kv_hashes] = (cache, cache.take_events())
+
+        _, plain_events = published[False]
+        self.assertEqual([e.lora_name for e in plain_events], [None, "adapter-a"])
+        self.assertTrue(all(e.namespaced_block_hashes is None for e in plain_events))
+
+        cache, (base, lora) = published[True]
+        self.assertEqual(base.block_hashes, lora.block_hashes)
+        self.assertEqual(base.namespaced_block_hashes, base.block_hashes)
+        self.assertNotEqual(lora.namespaced_block_hashes, base.namespaced_block_hashes)
+        self.assertEqual((base.lora_name, lora.lora_name), (None, "adapter-a"))
+
+        cache.evict(EvictParams(num_tokens=2 * len(tokens)))
+        removed = [
+            block_hash
+            for event in cache.take_events()
+            if isinstance(event, BlockRemoved)
+            for block_hash in event.namespaced_block_hashes
+        ]
+        self.assertCountEqual(
+            removed, base.namespaced_block_hashes + lora.namespaced_block_hashes
+        )
+
+    def test_namespaced_parent_link_survives_node_split(self):
+        lora_names = LoRANameTable()
+        cache = RadixCache.create_simulated(
+            page_size=2,
+            enable_kv_cache_events=True,
+            emit_namespaced_kv_hashes=True,
+            kv_event_lora_names=lora_names,
+        )
+        for tokens in ([1, 2, 3, 4], [1, 2, 9, 10]):
+            cache.insert(
+                InsertParams(
+                    key=RadixKey(array("q", tokens), extra_key="lora-a"),
+                    value=torch.tensor(tokens, dtype=torch.int64),
+                )
+            )
+        first, branch = cache.take_events()
+        self.assertEqual(
+            branch.namespaced_parent_block_hash, first.namespaced_block_hashes[0]
+        )
 
     def test_cache_salt_event_hashes_are_preserved_across_node_split(self):
         cache = RadixCache.create_simulated(page_size=2, enable_kv_cache_events=True)

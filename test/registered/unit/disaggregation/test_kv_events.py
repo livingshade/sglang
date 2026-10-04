@@ -16,9 +16,11 @@ from sglang.srt.disaggregation.kv_events import (
     AllBlocksCleared,
     BlockRemoved,
     BlockStored,
+    EventPublisherFactory,
     KVEventBatch,
     StorageMedium,
     ZmqEventPublisher,
+    emits_namespaced_hashes,
     resolve_load_pub_range,
     select_kv_publisher_dp_rank,
 )
@@ -224,6 +226,24 @@ class TestBlockStoredWireFormat(CustomTestCase):
         self.assertEqual(decoded["cache_salt"], "tenant-a")
         self.assertEqual(decoded["session_id"], "session-a")
 
+    def test_namespace_fields_are_named_fields(self):
+        # Consumers such as Dynamo read these keys by name.
+        stored = self._event(
+            lora_name="adapter-a",
+            namespaced_block_hashes=[456],
+            namespaced_parent_block_hash=789,
+        )
+        decoded = msgspec.msgpack.decode(msgspec.msgpack.encode(stored))
+        self.assertEqual(decoded["lora_name"], "adapter-a")
+        self.assertEqual(decoded["namespaced_block_hashes"], [456])
+        self.assertEqual(decoded["namespaced_parent_block_hash"], 789)
+
+        removed = BlockRemoved(
+            block_hashes=[123], medium=StorageMedium.GPU, namespaced_block_hashes=[456]
+        )
+        decoded = msgspec.msgpack.decode(msgspec.msgpack.encode(removed))
+        self.assertEqual(decoded["namespaced_block_hashes"], [456])
+
     def test_one_decoder_reads_a_mixed_batch(self):
         batch = KVEventBatch(
             ts=1.0,
@@ -251,6 +271,23 @@ class TestBlockStoredWireFormat(CustomTestCase):
         self.assertEqual(decoded[2], 0)
         self.assertIsInstance(decoded[1][0], dict)
         self.assertEqual(len(decoded), 3)
+
+
+class TestEventPublisherFactory(CustomTestCase):
+    def test_recorder_options_do_not_reach_the_publisher(self):
+        # The flag configures the cache's recorder; the publisher must not get it.
+        config = (
+            '{"publisher": "zmq", "emit_namespaced_hashes": true, '
+            f'"endpoint": "tcp://127.0.0.1:{get_free_port()}"}}'
+        )
+        publisher = EventPublisherFactory.create(config)
+        try:
+            self.assertIsInstance(publisher, ZmqEventPublisher)
+        finally:
+            publisher.shutdown()
+        self.assertTrue(emits_namespaced_hashes(config))
+        self.assertFalse(emits_namespaced_hashes('{"publisher": "zmq"}'))
+        self.assertFalse(emits_namespaced_hashes(None))
 
 
 class TestReplay(CustomTestCase):

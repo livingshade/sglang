@@ -460,7 +460,10 @@ class UnifiedTreeCore(UnifiedTreeCoreInterface):
         )
 
         self.kv_events = KVCacheEventRecorder(
-            enabled=params.enable_kv_cache_events, page_size=self.page_size
+            enabled=params.enable_kv_cache_events,
+            page_size=self.page_size,
+            emit_namespaced_hashes=params.emit_namespaced_kv_hashes,
+            lora_names=params.kv_event_lora_names,
         )
 
         self.reset()

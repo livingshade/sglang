@@ -31,6 +31,7 @@ from sglang.srt.mem_cache.base_prefix_cache import (
     MatchResult,
 )
 from sglang.srt.mem_cache.cache_init_params import CacheInitParams
+from sglang.srt.mem_cache.events import LoRANameTable
 from sglang.srt.mem_cache.evict_policy import TLRUStrategy
 from sglang.srt.mem_cache.hicache_storage import (
     PoolHitPolicy,
@@ -1649,6 +1650,61 @@ def test_salted_events_match_python_hash_and_metadata_contract():
     core.evict_device_end(ComponentType.FULL)
     assert core.take_events() == [
         BlockRemoved(block_hashes=hashes, medium=StorageMedium.GPU)
+    ]
+
+
+def test_namespaced_events_match_python_storage_hashes_and_name_the_adapter():
+    """The Rust tree publishes the Python storage chain and the adapter name."""
+    lora_id = "a" * 32
+    lora_names = LoRANameTable()
+    lora_names.register(lora_id=lora_id, lora_name="adapter-a")
+    core = _tree_core(
+        enable_kv_cache_events=True,
+        page_size=2,
+        emit_namespaced_kv_hashes=True,
+        kv_event_lora_names=lora_names,
+    )
+    key = RadixKey(array("q", [1, 2, 7, 8]), extra_key="user-" + lora_id)
+    _pump_insert(
+        core,
+        InsertParams(key=key, value=torch.tensor([10, 11, 12, 13], dtype=torch.int64)),
+    )
+    token_only = [
+        hash_str_to_int64(value)
+        for value in mem_cache.get_hash_str(array("q", [1, 2, 7, 8]), None, 2)
+    ]
+    storage = [
+        hash_str_to_int64(value) for value in get_storage_hash_str(key, page_size=2)
+    ]
+    assert storage != token_only
+    assert core.take_events() == [
+        BlockStored(
+            block_hashes=token_only,
+            parent_block_hash=None,
+            token_ids=[1, 2, 7, 8],
+            block_size=2,
+            lora_id=None,
+            medium=StorageMedium.GPU,
+            lora_name="adapter-a",
+            namespaced_block_hashes=storage,
+            namespaced_parent_block_hash=None,
+        )
+    ]
+
+    tracker = {ComponentType.FULL: 0}
+    core.evict_device_start(ComponentType.FULL, 4)
+    candidate = core.evict_device_next_node(ComponentType.FULL, tracker).node_id
+    assert candidate is not None
+    evicted = core.evict_device_leaf(candidate, is_write_back=False)
+    evicted.device_frees.clear()
+    evicted.host_frees.clear()
+    core.evict_device_end(ComponentType.FULL)
+    assert core.take_events() == [
+        BlockRemoved(
+            block_hashes=token_only,
+            medium=StorageMedium.GPU,
+            namespaced_block_hashes=storage,
+        )
     ]
 
 

@@ -288,11 +288,21 @@ class BlockStored(KVCacheEvent):
     # Session that triggered this store. Attribution only: the blocks may be
     # shared with other sessions, and the hash does not depend on it.
     session_id: Optional[str] = None
+    # Name of the LoRA adapter whose request stored these blocks. The block
+    # hashes do not depend on it.
+    lora_name: Optional[str] = None
+    # Storage-chain hashes, namespaced by extra_key and cache_salt, so blocks of
+    # different adapters or adapter loads never share one. Only set when
+    # KVEventsConfig.emit_namespaced_hashes is on.
+    namespaced_block_hashes: Optional[list[int]] = None
+    namespaced_parent_block_hash: Optional[int] = None
 
 
 class BlockRemoved(KVCacheEvent):
     block_hashes: list[int]
     medium: Optional[str] = None
+    # Same chain as BlockStored.namespaced_block_hashes.
+    namespaced_block_hashes: Optional[list[int]] = None
 
 
 class AllBlocksCleared(KVCacheEvent):
@@ -612,10 +622,24 @@ class KVEventsConfig(BaseModel):
     this topic to receive events.
     """
 
+    emit_namespaced_hashes: bool = False
+    """Also publish storage-chain block hashes namespaced by extra_key and
+    cache_salt (``namespaced_block_hashes``), for consumers that index blocks
+    by hash and must tell apart identical tokens cached under different LoRA
+    adapters. ``block_hashes`` is unchanged either way.
+    """
+
     @classmethod
     def from_cli(cls, cli_value: str) -> "KVEventsConfig":
         """Parse the CLI value for the event publisher config."""
         return KVEventsConfig.model_validate_json(cli_value)
+
+
+def emits_namespaced_hashes(kv_events_config: Optional[str]) -> bool:
+    """Whether the cache should attach namespaced hashes to its KV events."""
+    if not kv_events_config:
+        return False
+    return KVEventsConfig.from_cli(kv_events_config).emit_namespaced_hashes
 
 
 class EventPublisherFactory:
@@ -637,6 +661,8 @@ class EventPublisherFactory:
             return NullEventPublisher()
         config = KVEventsConfig.from_cli(config)
         config_dict = config.model_dump()
+        # Consumed by the cache's event recorder, not by the publisher.
+        config_dict.pop("emit_namespaced_hashes")
 
         kind = config_dict.pop("publisher", "null")
         try:
