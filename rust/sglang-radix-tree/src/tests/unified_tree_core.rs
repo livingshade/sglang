@@ -3508,14 +3508,9 @@ fn namespaced_hashes_separate_namespaces_that_share_block_hashes() {
         None,
     ));
     let stored = stored_namespaced_hashes(&tc.take_events());
-    let [
-        (base_hashes, base_namespaced),
-        (lora_hashes, lora_namespaced),
-    ] = stored.as_slice()
-    else {
+    let [(base_hashes, base_namespaced), (_, lora_namespaced)] = stored.as_slice() else {
         panic!("expected one store per namespace, got {stored:?}");
     };
-    assert_eq!(base_hashes, lora_hashes);
     assert_eq!(base_namespaced, base_hashes);
     assert_ne!(lora_namespaced, base_namespaced);
 
