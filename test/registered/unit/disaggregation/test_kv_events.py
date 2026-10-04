@@ -257,8 +257,8 @@ class TestBlockStoredWireFormat(CustomTestCase):
 
 class TestNamespacedBlockHash(CustomTestCase):
     def test_values_are_pinned(self):
-        # Consumers key their indexes by these values. The Rust test pins the
-        # same values.
+        # Rust has its own copy of this function. The Rust test pins the same
+        # values, so both copies give the same hashes, and the hashes do not change.
         seed = kv_event_namespace_seed(extra_key="lora-a", cache_salt=None)
         self.assertEqual(
             namespaced_block_hash(123, namespace_seed=seed), 9220659119954863560
