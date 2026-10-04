@@ -3594,8 +3594,8 @@ fn namespaced_hashes_separate_namespaces_that_share_block_hashes() {
 
 #[test]
 fn namespaced_block_hash_is_pinned() {
-    // Python has its own copy of this function. The Python test pins the same
-    // values, so both copies give the same hashes, and the hashes do not change.
+    // Python has its own copy of this function, and its test uses the same values.
+    // Thus the two copies must give the same hashes, and the hashes must not change.
     let seed = kv_event_namespace_seed(&KeyNamespace::new(Some("lora-a"), None));
     assert_eq!(namespaced_block_hash(seed.as_ref(), 123), 9220659119954863560);
     assert_eq!(namespaced_block_hash(seed.as_ref(), -5), -1810974732006142875);

@@ -5701,8 +5701,8 @@ impl StorageMedium {
     }
 }
 
-// Part of the event wire contract: a change moves every published namespaced
-// hash. Python has a byte-identical copy in disaggregation/kv_events.py.
+// Consumers use namespaced hashes as keys. If you change this tag, all of the
+// hashes change. Python has the same function in disaggregation/kv_events.py.
 const KV_EVENT_NAMESPACE_SEED_TAG: &[u8] = b"sglang-kv-event-namespace-v1";
 
 /// The seed for `namespaced_block_hash`, or None for no namespace.
@@ -5712,7 +5712,7 @@ pub(crate) fn kv_event_namespace_seed(namespace: &KeyNamespace) -> Option<HashDi
     }
     let mut hasher = Sha256::new();
     hasher.update(KV_EVENT_NAMESPACE_SEED_TAG);
-    // A presence byte and a length prefix keep ("a", "bc") apart from ("ab", "c").
+    // The presence byte and the length prefix make ("a", "bc") and ("ab", "c") differ.
     for part in [namespace.extra_key(), namespace.cache_salt()] {
         match part {
             None => hasher.update([0u8]),
@@ -5726,8 +5726,8 @@ pub(crate) fn kv_event_namespace_seed(namespace: &KeyNamespace) -> Option<HashDi
     Some(hasher.finalize().into())
 }
 
-/// Mix a namespace seed into a published block hash. Without a namespace the
-/// result is `block_hash`; else the first 8 bytes of SHA-256(seed, block_hash).
+/// Return the namespaced hash of a published block hash. If there is no namespace,
+/// the result is `block_hash`. If not, it is the first 8 bytes of SHA-256(seed, block_hash).
 pub(crate) fn namespaced_block_hash(seed: Option<&HashDigest>, block_hash: i64) -> i64 {
     let Some(seed) = seed else {
         return block_hash;
@@ -5752,7 +5752,7 @@ pub enum KvCacheEvent<A> {
         session_id: Option<Arc<str>>,
         /// Not published. Python uses it to find the LoRA adapter name.
         extra_key: Option<Arc<str>>,
-        /// `block_hashes` mixed with the namespace by `namespaced_block_hash`.
+        /// Hashes that `namespaced_block_hash` makes from `block_hashes` and the namespace.
         /// Set only when emit_namespaced_kv_hashes is true.
         namespaced_block_hashes: Option<Vec<i64>>,
         namespaced_parent_block_hash: Option<i64>,
