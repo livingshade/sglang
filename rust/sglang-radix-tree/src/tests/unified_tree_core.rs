@@ -3413,6 +3413,62 @@ fn event_coalescing_respects_store_remove_and_clear_boundaries() {
         namespaced_parent_block_hash: None,
     });
     assert_eq!(tc.kv_event_queue.len(), 2);
+
+    tc.kv_event_queue.clear();
+    tc.enqueue_kv_event_(KvCacheEvent::BlockStored {
+        block_hashes: vec![1],
+        parent_block_hash: None,
+        token_ids: vec![10, 11],
+        block_size: 2,
+        medium: StorageMedium::Gpu,
+        cache_salt: None,
+        session_id: None,
+        extra_key: Some(Arc::from("lora-a")),
+        namespaced_block_hashes: None,
+        namespaced_parent_block_hash: None,
+    });
+    tc.enqueue_kv_event_(KvCacheEvent::BlockStored {
+        block_hashes: vec![2],
+        parent_block_hash: Some(1),
+        token_ids: vec![12, 13],
+        block_size: 2,
+        medium: StorageMedium::Gpu,
+        cache_salt: None,
+        session_id: None,
+        extra_key: Some(Arc::from("lora-b")),
+        namespaced_block_hashes: None,
+        namespaced_parent_block_hash: None,
+    });
+    assert_eq!(tc.kv_event_queue.len(), 2);
+
+    // The block hashes link, but the namespaced hashes do not. This occurs
+    // when two adapters cache the same tokens.
+    tc.kv_event_queue.clear();
+    tc.enqueue_kv_event_(KvCacheEvent::BlockStored {
+        block_hashes: vec![1],
+        parent_block_hash: None,
+        token_ids: vec![10, 11],
+        block_size: 2,
+        medium: StorageMedium::Gpu,
+        cache_salt: None,
+        session_id: None,
+        extra_key: None,
+        namespaced_block_hashes: Some(vec![101]),
+        namespaced_parent_block_hash: None,
+    });
+    tc.enqueue_kv_event_(KvCacheEvent::BlockStored {
+        block_hashes: vec![2],
+        parent_block_hash: Some(1),
+        token_ids: vec![12, 13],
+        block_size: 2,
+        medium: StorageMedium::Gpu,
+        cache_salt: None,
+        session_id: None,
+        extra_key: None,
+        namespaced_block_hashes: Some(vec![102]),
+        namespaced_parent_block_hash: Some(7),
+    });
+    assert_eq!(tc.kv_event_queue.len(), 2);
 }
 
 #[test]
