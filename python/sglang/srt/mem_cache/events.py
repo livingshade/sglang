@@ -39,7 +39,10 @@ if TYPE_CHECKING:
 
 
 def _namespaced_chain_continues(*, tail: BlockStored, event: BlockStored) -> bool:
-    """Whether ``event`` extends ``tail``'s namespaced chain, when one is emitted."""
+    """Return True when ``event`` continues the namespaced chain of ``tail``.
+
+    Both events must have namespaced hashes, or both must not.
+    """
     if tail.namespaced_block_hashes is None or event.namespaced_block_hashes is None:
         return (
             tail.namespaced_block_hashes is None
@@ -52,11 +55,11 @@ def _namespaced_chain_continues(*, tail: BlockStored, event: BlockStored) -> boo
 
 
 class LoRANameTable:
-    """Maps the lora_id at the end of a radix key's extra_key to its adapter name.
+    """Find the LoRA adapter name from the lora_id at the end of extra_key.
 
-    Req appends lora_id to extra_key, so a tree node knows only the id. Entries
-    are never dropped: ids are not reused, and nodes cached under an unloaded
-    adapter can still publish stores until they are evicted.
+    Req adds lora_id to the end of extra_key, so a tree node has only the id.
+    The table keeps all entries. A lora_id is not used again, and nodes of an
+    unloaded adapter can publish stores until eviction.
     """
 
     def __init__(self):
@@ -178,10 +181,9 @@ class KVCacheEventRecorder:
 
     @staticmethod
     def _namespaced_parent_block_hash(node: Any) -> Optional[int]:
-        """The storage-chain link of ``node``'s first page.
+        """Return the storage-chain hash that the first page of ``node`` links to.
 
-        Mirrors the parent condition of ``compute_node_hash_values``, so the
-        link is exactly the hash the node's own storage chain continues from.
+        This uses the same parent rule as ``compute_node_hash_values``.
         """
         parent = node.parent
         if parent is None or not parent.hash_value or len(parent.key) == 0:

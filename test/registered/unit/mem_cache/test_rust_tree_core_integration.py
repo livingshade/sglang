@@ -1654,7 +1654,7 @@ def test_salted_events_match_python_hash_and_metadata_contract():
 
 
 def test_namespaced_events_match_python_storage_hashes_and_name_the_adapter():
-    """The Rust tree publishes the Python storage chain and the adapter name."""
+    """The Rust tree publishes the Python storage hashes and the adapter name."""
     lora_id = "a" * 32
     lora_names = LoRANameTable()
     lora_names.register(lora_id=lora_id, lora_name="adapter-a")

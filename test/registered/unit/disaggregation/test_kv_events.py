@@ -227,7 +227,7 @@ class TestBlockStoredWireFormat(CustomTestCase):
         self.assertEqual(decoded["session_id"], "session-a")
 
     def test_namespace_fields_are_named_fields(self):
-        # Consumers such as Dynamo read these keys by name.
+        # Consumers, for example Dynamo, read these keys by name.
         stored = self._event(
             lora_name="adapter-a",
             namespaced_block_hashes=[456],
@@ -275,7 +275,7 @@ class TestBlockStoredWireFormat(CustomTestCase):
 
 class TestEventPublisherFactory(CustomTestCase):
     def test_recorder_options_do_not_reach_the_publisher(self):
-        # The flag configures the cache's recorder; the publisher must not get it.
+        # The cache recorder uses this flag. The publisher must not receive it.
         config = (
             '{"publisher": "zmq", "emit_namespaced_hashes": true, '
             f'"endpoint": "tcp://127.0.0.1:{get_free_port()}"}}'

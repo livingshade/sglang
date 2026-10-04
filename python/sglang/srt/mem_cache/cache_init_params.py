@@ -35,7 +35,7 @@ class CacheInitParams:
     enable_metrics: bool = False
     enable_kv_cache_events: bool = False
     emit_namespaced_kv_hashes: bool = False
-    # Shared with the scheduler, which registers adapters as they load.
+    # The scheduler holds the same table and adds each adapter when it loads.
     kv_event_lora_names: Optional[LoRANameTable] = None
     enable_session_radix_cache: bool = False
 

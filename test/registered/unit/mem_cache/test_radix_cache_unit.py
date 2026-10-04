@@ -143,8 +143,8 @@ class TestKVCacheEventQueue(unittest.TestCase):
         queue.enqueue(self._store(2, 1, lora_name="adapter-b"))
         self.assertEqual(len(queue.take()), 2)
 
-        # Block hashes link up but the namespaced chain does not, as when two
-        # adapters cache the same tokens.
+        # The block hashes link, but the namespaced hashes do not. This occurs
+        # when two adapters cache the same tokens.
         queue = KVCacheEventRecorder(enabled=True, page_size=DEFAULT_PAGE_SIZE)
         queue.enqueue(self._store(1, None, namespaced=True))
         queue.enqueue(self._store(2, 1, namespaced=True, namespaced_parent_block_hash=7))
@@ -180,7 +180,7 @@ class TestLoRANameTable(unittest.TestCase):
         table.register(lora_id=lora_id, lora_name="adapter-a")
 
         self.assertEqual(table.resolve(lora_id), "adapter-a")
-        # Req appends lora_id to a caller-provided extra_key.
+        # Req adds lora_id to the end of the extra_key from the caller.
         self.assertEqual(table.resolve("tenant-" + lora_id), "adapter-a")
         self.assertIsNone(table.resolve("tenant-" + "f" * 32))
         self.assertIsNone(table.resolve(None))
@@ -804,8 +804,8 @@ class TestRadixCache(CustomTestCase):
             self.assertIsNotNone(published[1][-1][0])
 
     def test_namespaced_hashes_separate_lora_blocks_from_base_blocks(self):
-        """Consumers keyed by block hash must tell an adapter's blocks from the
-        base model's, which share block_hashes for identical tokens."""
+        """Adapter blocks and base blocks with the same tokens have the same
+        block_hashes. Namespaced hashes keep them apart."""
         lora_id = "0123456789abcdef0123456789abcdef"
         lora_names = LoRANameTable()
         lora_names.register(lora_id=lora_id, lora_name="adapter-a")

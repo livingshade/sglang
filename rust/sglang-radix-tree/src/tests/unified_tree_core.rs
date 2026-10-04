@@ -3496,8 +3496,8 @@ fn stored_namespaced_hashes(events: &[KvCacheEvent<i64>]) -> Vec<(Vec<i64>, Vec<
 
 #[test]
 fn namespaced_hashes_separate_namespaces_that_share_block_hashes() {
-    // Router indexes keyed by block hash need these to tell an adapter's
-    // blocks from the base model's, and a removal from either one.
+    // A router that keys blocks by hash uses these hashes to keep adapter
+    // blocks and base blocks apart. This is also necessary for removals.
     let mut tc = namespaced_events_core(2);
     let key = vec![1, 2, 7, 8];
     tc.insert(&insert_params(&key, &[10, 11, 12, 13]));

@@ -527,7 +527,7 @@ pub struct CacheInitParams {
     pub has_swa_host_pool: bool,
     /// Whether tree mutations emit BlockStored/BlockRemoved events.
     pub enable_kv_cache_events: bool,
-    /// Whether events also carry the storage-chain (namespaced) hashes.
+    /// If true, events also carry the storage-chain (namespaced) hashes.
     pub emit_namespaced_kv_hashes: bool,
     /// Chunk alignment for the mamba branching seqlen; None when Mamba is disabled.
     pub mamba_cache_chunk_size: Option<usize>,
@@ -621,7 +621,7 @@ pub struct UnifiedTreeCore<K: ChildKeyType> {
     pub(crate) has_swa_host_pool: bool,
     /// Whether tree mutations emit BlockStored/BlockRemoved events.
     pub(crate) enable_kv_cache_events: bool,
-    /// Whether events also carry the storage-chain (namespaced) hashes.
+    /// If true, events also carry the storage-chain (namespaced) hashes.
     pub(crate) emit_namespaced_kv_hashes: bool,
     /// Queued placement events, drained by take_events.
     pub(crate) kv_event_queue: Vec<KvCacheEvent<K::Atom>>,
@@ -3421,8 +3421,8 @@ impl<K: ChildKeyType> UnifiedTreeCore<K> {
         }
     }
 
-    /// The storage-chain link of `node_id`'s first page; mirrors the parent rule
-    /// of `compute_node_hash_values`, so it is the hash the node's chain continues.
+    /// The storage-chain hash that the first page of `node_id` links to.
+    /// This uses the same parent rule as `compute_node_hash_values`.
     fn storage_parent_block_hash_(&self, node_id: NodeIdx_) -> Option<i64> {
         let parent = self.arena.node(self.arena.node(node_id).try_parent()?);
         if parent.key.atom_len() == 0 {
@@ -5736,9 +5736,9 @@ pub enum KvCacheEvent<A> {
         medium: StorageMedium,
         cache_salt: Option<Arc<str>>,
         session_id: Option<Arc<str>>,
-        /// Not published; Python resolves the LoRA adapter name from it.
+        /// Not published. Python uses it to find the LoRA adapter name.
         extra_key: Option<Arc<str>>,
-        /// Storage-chain hashes; Some only with emit_namespaced_kv_hashes.
+        /// Storage-chain hashes. Set only when emit_namespaced_kv_hashes is true.
         namespaced_block_hashes: Option<Vec<i64>>,
         namespaced_parent_block_hash: Option<i64>,
     },
