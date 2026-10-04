@@ -44,18 +44,6 @@ if TYPE_CHECKING:
 _LORA_ID_LEN = 32
 
 
-def _namespaced_chain_continues(*, tail: BlockStored, event: BlockStored) -> bool:
-    if tail.namespaced_block_hashes is None or event.namespaced_block_hashes is None:
-        return (
-            tail.namespaced_block_hashes is None
-            and event.namespaced_block_hashes is None
-        )
-    return (
-        bool(tail.namespaced_block_hashes)
-        and event.namespaced_parent_block_hash == tail.namespaced_block_hashes[-1]
-    )
-
-
 class LoRANameTable:
     """Find the LoRA adapter name from the lora_id at the end of extra_key.
 
@@ -115,10 +103,7 @@ class KVCacheEventRecorder:
             tail = self._queue[-1]
 
             if isinstance(tail, BlockRemoved) and isinstance(event, BlockRemoved):
-                if tail.medium == event.medium and (
-                    (tail.namespaced_block_hashes is None)
-                    == (event.namespaced_block_hashes is None)
-                ):
+                if tail.medium == event.medium:
                     tail.block_hashes.extend(event.block_hashes)
                     if tail.namespaced_block_hashes is not None:
                         tail.namespaced_block_hashes.extend(
@@ -136,7 +121,11 @@ class KVCacheEventRecorder:
                     and tail.session_id == event.session_id
                     and tail.block_hashes
                     and event.parent_block_hash == tail.block_hashes[-1]
-                    and _namespaced_chain_continues(tail=tail, event=event)
+                    and (
+                        tail.namespaced_block_hashes is None
+                        or event.namespaced_parent_block_hash
+                        == tail.namespaced_block_hashes[-1]
+                    )
                 ):
                     tail.block_hashes.extend(event.block_hashes)
                     tail.token_ids.extend(event.token_ids)

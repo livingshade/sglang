@@ -3164,9 +3164,7 @@ impl<K: ChildKeyType> UnifiedTreeCore<K> {
                     medium,
                     namespaced_block_hashes,
                 },
-            ) if *tail_medium == medium
-                && tail_namespaced.is_some() == namespaced_block_hashes.is_some() =>
-            {
+            ) if *tail_medium == medium => {
                 tail_hashes.append(&mut block_hashes);
                 if let (Some(tail_namespaced), Some(mut namespaced)) =
                     (tail_namespaced.as_mut(), namespaced_block_hashes)
@@ -3205,14 +3203,9 @@ impl<K: ChildKeyType> UnifiedTreeCore<K> {
                 && *tail_extra_key == extra_key
                 && !tail_hashes.is_empty()
                 && parent_block_hash == tail_hashes.last().copied()
-                && match (tail_namespaced.as_ref(), namespaced_block_hashes.as_ref()) {
-                    (None, None) => true,
-                    (Some(tail_namespaced), Some(_)) => {
-                        !tail_namespaced.is_empty()
-                            && namespaced_parent_block_hash == tail_namespaced.last().copied()
-                    }
-                    _ => false,
-                } =>
+                && tail_namespaced.as_ref().is_none_or(|tail_namespaced| {
+                    namespaced_parent_block_hash == tail_namespaced.last().copied()
+                }) =>
             {
                 tail_hashes.append(&mut block_hashes);
                 tail_token_ids.append(&mut token_ids);
