@@ -19,6 +19,7 @@ KV caching events
 
 import atexit
 import enum
+import hashlib
 import logging
 import queue
 import threading
@@ -291,9 +292,8 @@ class BlockStored(KVCacheEvent):
     # The LoRA adapter name of the request that stored these blocks.
     # The block hashes do not include this name.
     lora_name: Optional[str] = None
-    # Storage-chain hashes from mem_cache.utils.compute_node_hash_values. They
-    # include extra_key and cache_salt, so two adapter loads never share a hash.
-    # Set only when emit_namespaced_hashes is on.
+    # block_hashes with extra_key and cache_salt mixed in by namespaced_block_hash.
+    # Two adapter loads never share a hash. Set only when emit_namespaced_hashes is on.
     namespaced_block_hashes: Optional[list[int]] = None
     namespaced_parent_block_hash: Optional[int] = None
 
@@ -306,6 +306,42 @@ class BlockRemoved(KVCacheEvent):
 
 class AllBlocksCleared(KVCacheEvent):
     pass
+
+
+# Part of the event wire contract: a change moves every published namespaced
+# hash. The Rust tree core has a byte-identical copy.
+_NAMESPACE_SEED_TAG = b"sglang-kv-event-namespace-v1"
+
+
+def kv_event_namespace_seed(
+    *, extra_key: Optional[str], cache_salt: Optional[str]
+) -> Optional[bytes]:
+    """Return the seed for namespaced_block_hash, or None for no namespace."""
+    if extra_key is None and cache_salt is None:
+        return None
+    digest = hashlib.sha256(_NAMESPACE_SEED_TAG)
+    # A presence byte and a length prefix keep ("a", "bc") apart from ("ab", "c").
+    for part in (extra_key, cache_salt):
+        if part is None:
+            digest.update(b"\x00")
+            continue
+        encoded = part.encode("utf-8")
+        digest.update(b"\x01" + len(encoded).to_bytes(8, "little") + encoded)
+    return digest.digest()
+
+
+def namespaced_block_hash(block_hash: int, *, namespace_seed: Optional[bytes]) -> int:
+    """Mix a namespace seed into a published block hash.
+
+    Without a namespace the result is ``block_hash``. Otherwise it is the first
+    8 bytes of SHA-256(seed, block_hash as 8 big-endian bytes), as a signed int64.
+    """
+    if namespace_seed is None:
+        return block_hash
+    digest = hashlib.sha256(
+        namespace_seed + block_hash.to_bytes(8, "big", signed=True)
+    ).digest()
+    return int.from_bytes(digest[:8], "big", signed=True)
 
 
 class KVEventBatch(EventBatch):

@@ -20,6 +20,8 @@ from sglang.srt.disaggregation.kv_events import (
     BlockRemoved,
     BlockStored,
     StorageMedium,
+    kv_event_namespace_seed,
+    namespaced_block_hash,
 )
 from sglang.srt.environ import envs
 from sglang.srt.mem_cache.base_prefix_cache import (
@@ -1653,8 +1655,8 @@ def test_salted_events_match_python_hash_and_metadata_contract():
     ]
 
 
-def test_namespaced_events_match_python_storage_hashes_and_name_the_adapter():
-    """The Rust tree publishes the Python storage hashes and the adapter name."""
+def test_namespaced_events_match_python_hashes_and_name_the_adapter():
+    """The Rust tree publishes the Python namespaced hashes and the adapter name."""
     lora_id = "a" * 32
     lora_names = LoRANameTable()
     lora_names.register(lora_id=lora_id, lora_name="adapter-a")
@@ -1673,10 +1675,9 @@ def test_namespaced_events_match_python_storage_hashes_and_name_the_adapter():
         hash_str_to_int64(value)
         for value in mem_cache.get_hash_str(array("q", [1, 2, 7, 8]), None, 2)
     ]
-    storage = [
-        hash_str_to_int64(value) for value in get_storage_hash_str(key, page_size=2)
-    ]
-    assert storage != token_only
+    seed = kv_event_namespace_seed(extra_key=key.extra_key, cache_salt=None)
+    namespaced = [namespaced_block_hash(h, namespace_seed=seed) for h in token_only]
+    assert namespaced != token_only
     assert core.take_events() == [
         BlockStored(
             block_hashes=token_only,
@@ -1686,7 +1687,7 @@ def test_namespaced_events_match_python_storage_hashes_and_name_the_adapter():
             lora_id=None,
             medium=StorageMedium.GPU,
             lora_name="adapter-a",
-            namespaced_block_hashes=storage,
+            namespaced_block_hashes=namespaced,
             namespaced_parent_block_hash=None,
         )
     ]
@@ -1703,7 +1704,7 @@ def test_namespaced_events_match_python_storage_hashes_and_name_the_adapter():
         BlockRemoved(
             block_hashes=token_only,
             medium=StorageMedium.GPU,
-            namespaced_block_hashes=storage,
+            namespaced_block_hashes=namespaced,
         )
     ]
 

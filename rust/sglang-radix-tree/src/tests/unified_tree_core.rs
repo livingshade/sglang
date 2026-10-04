@@ -3542,6 +3542,16 @@ fn namespaced_hashes_separate_namespaces_that_share_block_hashes() {
 }
 
 #[test]
+fn namespaced_block_hash_is_pinned() {
+    // Consumers key their indexes by these values. The Python test pins the
+    // same values.
+    let seed = kv_event_namespace_seed(&KeyNamespace::new(Some("lora-a"), None));
+    assert_eq!(namespaced_block_hash(seed.as_ref(), 123), 9220659119954863560);
+    assert_eq!(namespaced_block_hash(seed.as_ref(), -5), -1810974732006142875);
+    assert_eq!(namespaced_block_hash(None, 123), 123);
+}
+
+#[test]
 fn namespaced_parent_link_survives_node_split() {
     let mut tc = namespaced_events_core(2);
     tc.insert(&insert_params_in_namespace(

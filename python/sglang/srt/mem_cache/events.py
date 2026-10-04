@@ -27,6 +27,8 @@ from sglang.srt.disaggregation.kv_events import (
     BlockRemoved,
     BlockStored,
     StorageMedium,
+    kv_event_namespace_seed,
+    namespaced_block_hash,
 )
 from sglang.srt.mem_cache.utils import (
     compute_node_event_hash_values,
@@ -175,13 +177,32 @@ class KVCacheEventRecorder:
             return None
         return hash_str_to_int64(parent_hash_values[-1])
 
-    @staticmethod
-    def _namespaced_parent_block_hash(node: Any) -> Optional[int]:
-        # Same parent rule as compute_node_hash_values.
-        parent = node.parent
-        if parent is None or not parent.hash_value or len(parent.key) == 0:
-            return None
-        return hash_str_to_int64(parent.hash_value[-1])
+    def _namespace_seed(self, node: Any) -> Optional[bytes]:
+        return kv_event_namespace_seed(
+            extra_key=node.key.extra_key, cache_salt=node.key.cache_salt
+        )
+
+    def _namespaced_fields(
+        self,
+        *,
+        block_hash: int,
+        parent_block_hash: Optional[int],
+        namespace_seed: Optional[bytes],
+    ) -> dict:
+        if not self.emit_namespaced_hashes:
+            return {}
+        return dict(
+            namespaced_block_hashes=[
+                namespaced_block_hash(block_hash, namespace_seed=namespace_seed)
+            ],
+            namespaced_parent_block_hash=(
+                None
+                if parent_block_hash is None
+                else namespaced_block_hash(
+                    parent_block_hash, namespace_seed=namespace_seed
+                )
+            ),
+        )
 
     def record_store(
         self, node: Any, medium=None, *, session_id: Optional[str] = None
@@ -197,11 +218,7 @@ class KVCacheEventRecorder:
         event_hash_values = self._node_event_hash_values(node)
         parent_block_hash = self._parent_block_hash(node)
         lora_name = self.lora_names.resolve(node.key.extra_key)
-        namespaced_parent_block_hash = (
-            self._namespaced_parent_block_hash(node)
-            if self.emit_namespaced_hashes
-            else None
-        )
+        namespace_seed = self._namespace_seed(node)
 
         page_index = 0
         logical_len = len(node.key)
@@ -218,11 +235,6 @@ class KVCacheEventRecorder:
                 page_tokens = list(raw[start:end])
 
             block_hash = hash_str_to_int64(event_hash_values[page_index])
-            namespaced_block_hash = (
-                hash_str_to_int64(node.hash_value[page_index])
-                if self.emit_namespaced_hashes
-                else None
-            )
 
             self.enqueue(
                 BlockStored(
@@ -235,15 +247,15 @@ class KVCacheEventRecorder:
                     cache_salt=node.key.cache_salt,
                     session_id=session_id,
                     lora_name=lora_name,
-                    namespaced_block_hashes=(
-                        [namespaced_block_hash] if self.emit_namespaced_hashes else None
+                    **self._namespaced_fields(
+                        block_hash=block_hash,
+                        parent_block_hash=parent_block_hash,
+                        namespace_seed=namespace_seed,
                     ),
-                    namespaced_parent_block_hash=namespaced_parent_block_hash,
                 )
             )
 
             parent_block_hash = block_hash
-            namespaced_parent_block_hash = namespaced_block_hash
             page_index += 1
 
     def record_remove(self, node: Any, medium=None) -> None:
@@ -259,7 +271,6 @@ class KVCacheEventRecorder:
         event_hash_values = self._node_event_hash_values(node)
 
         block_hashes = []
-        namespaced_block_hashes = [] if self.emit_namespaced_hashes else None
         logical_len = len(node.key)
         page_index = 0
         for start in range(0, logical_len, self.page_size):
@@ -268,13 +279,16 @@ class KVCacheEventRecorder:
                 continue
 
             block_hashes.append(hash_str_to_int64(event_hash_values[page_index]))
-            if namespaced_block_hashes is not None:
-                namespaced_block_hashes.append(
-                    hash_str_to_int64(node.hash_value[page_index])
-                )
             page_index += 1
 
         if block_hashes:
+            namespaced_block_hashes = None
+            if self.emit_namespaced_hashes:
+                namespace_seed = self._namespace_seed(node)
+                namespaced_block_hashes = [
+                    namespaced_block_hash(h, namespace_seed=namespace_seed)
+                    for h in block_hashes
+                ]
             self.enqueue(
                 BlockRemoved(
                     block_hashes=block_hashes,
