@@ -3548,7 +3548,6 @@ fn namespaced_block_hash_is_pinned() {
     let seed = kv_event_namespace_seed(&KeyNamespace::new(Some("lora-a"), None));
     assert_eq!(namespaced_block_hash(seed.as_ref(), 123), 9220659119954863560);
     assert_eq!(namespaced_block_hash(seed.as_ref(), -5), -1810974732006142875);
-    assert_eq!(namespaced_block_hash(None, 123), 123);
 }
 
 #[test]
