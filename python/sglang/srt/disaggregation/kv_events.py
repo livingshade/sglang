@@ -291,8 +291,9 @@ class BlockStored(KVCacheEvent):
     # The LoRA adapter name of the request that stored these blocks.
     # The block hashes do not include this name.
     lora_name: Optional[str] = None
-    # Storage-chain hashes that include extra_key and cache_salt. Two adapter
-    # loads never share a hash. Set only when emit_namespaced_hashes is on.
+    # Storage-chain hashes from mem_cache.utils.compute_node_hash_values. They
+    # include extra_key and cache_salt, so two adapter loads never share a hash.
+    # Set only when emit_namespaced_hashes is on.
     namespaced_block_hashes: Optional[list[int]] = None
     namespaced_parent_block_hash: Optional[int] = None
 
