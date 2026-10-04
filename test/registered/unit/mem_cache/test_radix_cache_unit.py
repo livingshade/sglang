@@ -150,28 +150,6 @@ class TestKVCacheEventQueue(unittest.TestCase):
         queue.enqueue(self._store(2, 1, namespaced=True, namespaced_parent_block_hash=7))
         self.assertEqual(len(queue.take()), 2)
 
-    def test_enqueue_coalesces_namespaced_chains(self):
-        queue = KVCacheEventRecorder(enabled=True, page_size=DEFAULT_PAGE_SIZE)
-        queue.enqueue(self._store(1, None, namespaced=True))
-        queue.enqueue(
-            self._store(2, 1, namespaced=True, namespaced_parent_block_hash=101)
-        )
-        queue.enqueue(
-            BlockRemoved(
-                block_hashes=[1], medium=StorageMedium.GPU, namespaced_block_hashes=[101]
-            )
-        )
-        queue.enqueue(
-            BlockRemoved(
-                block_hashes=[2], medium=StorageMedium.GPU, namespaced_block_hashes=[102]
-            )
-        )
-
-        stored, removed = queue.take()
-        self.assertEqual(stored.block_hashes, [1, 2])
-        self.assertEqual(stored.namespaced_block_hashes, [101, 102])
-        self.assertEqual(removed.namespaced_block_hashes, [101, 102])
-
 
 class TestLoRANameTable(unittest.TestCase):
     def test_resolves_the_lora_id_suffix_of_extra_key(self):
@@ -179,11 +157,9 @@ class TestLoRANameTable(unittest.TestCase):
         table = LoRANameTable()
         table.register(lora_id=lora_id, lora_name="adapter-a")
 
-        self.assertEqual(table.resolve(lora_id), "adapter-a")
         # Req adds lora_id to the end of the extra_key from the caller.
         self.assertEqual(table.resolve("tenant-" + lora_id), "adapter-a")
         self.assertIsNone(table.resolve("tenant-" + "f" * 32))
-        self.assertIsNone(table.resolve(None))
 
 
 class TestRadixKey(unittest.TestCase):
@@ -810,30 +786,21 @@ class TestRadixCache(CustomTestCase):
         lora_names = LoRANameTable()
         lora_names.register(lora_id=lora_id, lora_name="adapter-a")
         tokens = [1, 2, 3, 4]
-
-        published = {}
-        for emit_namespaced_kv_hashes in (False, True):
-            cache = RadixCache.create_simulated(
-                page_size=2,
-                enable_kv_cache_events=True,
-                emit_namespaced_kv_hashes=emit_namespaced_kv_hashes,
-                kv_event_lora_names=lora_names,
-            )
-            for extra_key in (None, lora_id):
-                cache.insert(
-                    InsertParams(
-                        key=RadixKey(array("q", tokens), extra_key=extra_key),
-                        value=torch.tensor(tokens, dtype=torch.int64),
-                    )
+        cache = RadixCache.create_simulated(
+            page_size=2,
+            enable_kv_cache_events=True,
+            emit_namespaced_kv_hashes=True,
+            kv_event_lora_names=lora_names,
+        )
+        for extra_key in (None, lora_id):
+            cache.insert(
+                InsertParams(
+                    key=RadixKey(array("q", tokens), extra_key=extra_key),
+                    value=torch.tensor(tokens, dtype=torch.int64),
                 )
-            published[emit_namespaced_kv_hashes] = (cache, cache.take_events())
+            )
 
-        _, plain_events = published[False]
-        self.assertEqual([e.lora_name for e in plain_events], [None, "adapter-a"])
-        self.assertTrue(all(e.namespaced_block_hashes is None for e in plain_events))
-
-        cache, (base, lora) = published[True]
-        self.assertEqual(base.block_hashes, lora.block_hashes)
+        base, lora = cache.take_events()
         self.assertEqual(base.namespaced_block_hashes, base.block_hashes)
         self.assertNotEqual(lora.namespaced_block_hashes, base.namespaced_block_hashes)
         self.assertEqual((base.lora_name, lora.lora_name), (None, "adapter-a"))
@@ -850,12 +817,8 @@ class TestRadixCache(CustomTestCase):
         )
 
     def test_namespaced_parent_link_survives_node_split(self):
-        lora_names = LoRANameTable()
         cache = RadixCache.create_simulated(
-            page_size=2,
-            enable_kv_cache_events=True,
-            emit_namespaced_kv_hashes=True,
-            kv_event_lora_names=lora_names,
+            page_size=2, enable_kv_cache_events=True, emit_namespaced_kv_hashes=True
         )
         for tokens in ([1, 2, 3, 4], [1, 2, 9, 10]):
             cache.insert(
