@@ -39,6 +39,9 @@ from sglang.srt.mem_cache.utils import (
 if TYPE_CHECKING:
     from sglang.srt.lora.lora_registry import LoRARef
 
+# LoRARef.lora_id is a uuid4 or uuid5 hex string.
+_LORA_ID_LEN = 32
+
 
 def _namespaced_chain_continues(*, tail: BlockStored, event: BlockStored) -> bool:
     if tail.namespaced_block_hashes is None or event.namespaced_block_hashes is None:
@@ -62,7 +65,6 @@ class LoRANameTable:
 
     def __init__(self):
         self._names: dict[str, str] = {}
-        self._id_lengths: set[int] = set()
 
     @classmethod
     def from_lora_refs(cls, lora_refs: Optional[Iterable[LoRARef]]) -> LoRANameTable:
@@ -72,17 +74,13 @@ class LoRANameTable:
         return table
 
     def register(self, *, lora_id: str, lora_name: str) -> None:
+        assert len(lora_id) == _LORA_ID_LEN, lora_id
         self._names[lora_id] = lora_name
-        self._id_lengths.add(len(lora_id))
 
     def resolve(self, extra_key: Optional[str]) -> Optional[str]:
         if not extra_key:
             return None
-        for id_length in self._id_lengths:
-            lora_name = self._names.get(extra_key[-id_length:])
-            if lora_name is not None:
-                return lora_name
-        return None
+        return self._names.get(extra_key[-_LORA_ID_LEN:])
 
 
 class KVCacheEventRecorder:
