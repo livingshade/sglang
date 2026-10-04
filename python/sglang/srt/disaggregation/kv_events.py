@@ -301,7 +301,6 @@ class BlockStored(KVCacheEvent):
 class BlockRemoved(KVCacheEvent):
     block_hashes: list[int]
     medium: Optional[str] = None
-    # The same hashes as BlockStored.namespaced_block_hashes.
     namespaced_block_hashes: Optional[list[int]] = None
 
 
@@ -636,7 +635,6 @@ class KVEventsConfig(BaseModel):
 
 
 def emits_namespaced_hashes(kv_events_config: Optional[str]) -> bool:
-    """Return True when the config turns on namespaced hashes in KV events."""
     if not kv_events_config:
         return False
     return KVEventsConfig.from_cli(kv_events_config).emit_namespaced_hashes

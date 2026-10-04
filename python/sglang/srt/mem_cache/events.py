@@ -39,10 +39,6 @@ if TYPE_CHECKING:
 
 
 def _namespaced_chain_continues(*, tail: BlockStored, event: BlockStored) -> bool:
-    """Return True when ``event`` continues the namespaced chain of ``tail``.
-
-    Both events must have namespaced hashes, or both must not.
-    """
     if tail.namespaced_block_hashes is None or event.namespaced_block_hashes is None:
         return (
             tail.namespaced_block_hashes is None
@@ -181,10 +177,7 @@ class KVCacheEventRecorder:
 
     @staticmethod
     def _namespaced_parent_block_hash(node: Any) -> Optional[int]:
-        """Return the storage-chain hash that the first page of ``node`` links to.
-
-        This uses the same parent rule as ``compute_node_hash_values``.
-        """
+        # Same parent rule as compute_node_hash_values.
         parent = node.parent
         if parent is None or not parent.hash_value or len(parent.key) == 0:
             return None
