@@ -6,18 +6,11 @@ Peer and plans transfers from its PeerLayout; the Transport sees only `remote`.
 
 from __future__ import annotations
 
-import time
-from typing import Callable, Dict, List, Optional, Tuple
+from typing import List, Optional
 
 import msgspec
 
 from sglang.srt.disaggregation.transport.base import RemoteBuffers
-
-# Arbitrary; far above how long a failed write may still touch memory
-# (about 5 s for Mooncake), so the release needs no in-flight tracking.
-RETIRED_PEER_RELEASE_DELAY_S = 60.0
-# Bounds how often the room table is scanned while a retired peer waits.
-_RETIRED_PEER_SWEEP_INTERVAL_S = 1.0
 
 
 class PeerLayout(msgspec.Struct, frozen=True):
@@ -69,45 +62,3 @@ class Peer(msgspec.Struct, frozen=True, eq=False):
     @property
     def requires_dcp_relayout(self) -> bool:
         return self.dcp_token_item_lens is not None
-
-
-class RetiredPeers:
-    """Peers a re-registration replaced, waiting for their import to be released.
-
-    Release is conservative: a retired peer is released once
-    RETIRED_PEER_RELEASE_DELAY_S has passed since it retired and no room in the
-    room table references it. Not thread-safe; the thread that registers peers
-    owns it.
-    """
-
-    def __init__(self, release_remote: Callable[[RemoteBuffers], None]):
-        self._release_remote = release_remote
-        # (retire time, peer), oldest first.
-        self._peers: List[Tuple[float, Peer]] = []
-        self._next_sweep = 0.0
-
-    def retire(self, peer: Peer) -> None:
-        self._peers.append((time.monotonic(), peer))
-
-    def sweep(self, transfer_infos: Dict[int, Dict[Peer, object]]) -> None:
-        """Release the retired peers that are due. `transfer_infos` is the
-        room table, keyed by room and then by Peer."""
-        now = time.monotonic()
-        if (
-            not self._peers
-            or now < self._next_sweep
-            or now - self._peers[0][0] < RETIRED_PEER_RELEASE_DELAY_S
-        ):
-            return
-        self._next_sweep = now + _RETIRED_PEER_SWEEP_INTERVAL_S
-        # Snapshot: other threads add and drop rooms while this walks them.
-        rooms = list(transfer_infos.values())
-        waiting = []
-        for retired_at, peer in self._peers:
-            if now - retired_at < RETIRED_PEER_RELEASE_DELAY_S or any(
-                peer in room for room in rooms
-            ):
-                waiting.append((retired_at, peer))
-            else:
-                self._release_remote(peer.remote)
-        self._peers = waiting

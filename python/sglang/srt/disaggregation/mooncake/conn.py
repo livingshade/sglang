@@ -26,7 +26,7 @@ from sglang.srt.disaggregation.common.conn import (
     CommonKVReceiver,
     CommonKVSender,
 )
-from sglang.srt.disaggregation.common.peer import PeerLayout, RetiredPeers
+from sglang.srt.disaggregation.common.peer import PeerLayout
 from sglang.srt.disaggregation.common.staging_handler import (
     STAGING_WATERMARK_WAIT_S,
     DecodeStagingContext,
@@ -297,8 +297,6 @@ class MooncakeKVManager(StagingManagerMixin, CommonKVManager):
         )
         # Prefill only: each decode's current registration, by mooncake session id.
         self._peers: Dict[str, MooncakePeer] = {}
-        # Prefill only, bootstrap thread: registrations a newer one replaced.
-        self._retired_peers = RetiredPeers(self.transport.release_remote)
         self.register_buffer_to_engine()
         self.enable_staging = envs.SGLANG_DISAGG_STAGING_BUFFER.get()
         self.max_transfer_batch_indices = (
@@ -969,7 +967,6 @@ class MooncakeKVManager(StagingManagerMixin, CommonKVManager):
             with self.session_lock:
                 self._unblacklist_peer(previous)
                 self.fan_in_rejections.pop(previous, None)
-            self._retired_peers.retire(previous)
         return mismatch
 
     def _reject_decode_without_fan_in(
@@ -1015,6 +1012,7 @@ class MooncakeKVManager(StagingManagerMixin, CommonKVManager):
             rejection=None,
             layout=layout,
             keys=registration.keys,
+            has_staging=registration.has_staging,
             dcp_token_item_lens=dcp_token_item_lens,
             state_strides_validated=False,
         )
@@ -3235,7 +3233,10 @@ class MooncakeKVManager(StagingManagerMixin, CommonKVManager):
                         elif (
                             self.enable_staging
                             and staging_strategy is not None
-                            and target_rank_registration_info.staging_total_size != 0
+                            and (
+                                peer.has_staging
+                                or target_rank_registration_info.staging_total_size != 0
+                            )
                         ):
                             ret, deferred = self._do_staging_transfer(
                                 staging_strategy,
@@ -3505,7 +3506,6 @@ class MooncakeKVManager(StagingManagerMixin, CommonKVManager):
             # KVPoll.Bootstrapping -> KVPoll.WaitingForInput
             while not self._stopped:
                 waiting_req_bytes = recv()
-                self._retired_peers.sweep(self.transfer_infos)
                 if waiting_req_bytes is None:
                     continue
                 room = waiting_req_bytes[0].decode("ascii")
@@ -3641,10 +3641,11 @@ class MooncakeKVManager(StagingManagerMixin, CommonKVManager):
         # NOTE(shangming): sharding according to the dst_infos to make sure
         # requests with the same dst_sessions will be added into the same
         # queue, which enables early abort with failed sessions.
-        dst_port_sum = sum(
-            info.dst_port for info in self.transfer_infos[bootstrap_room].values()
+        session_port_sum = sum(
+            int(peer.name.rsplit(":", 1)[1])
+            for peer in self.transfer_infos[bootstrap_room]
         )
-        shard_idx = dst_port_sum % len(self.transfer_queues)
+        shard_idx = session_port_sum % len(self.transfer_queues)
 
         if trace_ctx is None:
             trace_ctx = TraceNullContext()

@@ -134,5 +134,7 @@ class MooncakePeer(Peer, frozen=True, eq=False):
 
     remote: MooncakeRemoteBuffers
     keys: BufferKeys
+    # The registration exported a staging ring under PEER_STAGING_KEY.
+    has_staging: bool
     # Registration cleared the state strides; skip the per-transfer check.
     state_strides_validated: bool
