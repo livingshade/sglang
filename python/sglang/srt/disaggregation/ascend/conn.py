@@ -15,9 +15,9 @@ from sglang.srt.disaggregation.mooncake.conn import (
     MooncakeKVManager,
     MooncakeKVReceiver,
     MooncakeKVSender,
-    MooncakePeer,
     _DcpIndexK,
 )
+from sglang.srt.disaggregation.mooncake.peer import MooncakePeer
 from sglang.srt.disaggregation.transport.base import Copy
 from sglang.srt.disaggregation.utils import resolve_dcp_dst_entry_indices
 from sglang.srt.runtime_context import get_parallel

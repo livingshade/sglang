@@ -34,7 +34,6 @@ logger = logging.getLogger(__name__)
 STAGING_WATERMARK_WAIT_S = 0.001
 
 if TYPE_CHECKING:
-    from sglang.srt.disaggregation.common.peer import Peer
     from sglang.srt.disaggregation.decode import DecodeRequest
 
 
@@ -773,34 +772,37 @@ class PrefillStagingStrategy:
 
     def transfer(
         self,
-        peer: Peer,
+        session_id: str,
         prefill_kv_indices,
-        dst_staging_offset: int,
+        dst_staging_ptr: int,
         dst_staging_size: int,
+        target_info,
     ) -> int:
-        """Execute staged transfer (gather + RDMA) into the peer's staging ring
-        at `dst_staging_offset`.
+        """Execute staged transfer (gather + RDMA).
 
         Returns 0 on success, -1 to signal fallback to slice path.
         """
-        layout = peer.layout
         try:
             return self.kv_manager.send_kvcache_staged(
-                peer,
+                session_id,
                 prefill_kv_indices,
-                dst_staging_offset,
+                dst_staging_ptr,
                 dst_staging_size,
-                layout.dst_tp_rank,
-                layout.dst_attn_tp_size,
-                layout.dst_kv_item_len,
-                layout.dst_kv_layer_ids,
+                target_info.dst_tp_rank,
+                target_info.dst_attn_tp_size,
+                target_info.dst_kv_item_len,
+                target_info.dst_kv_layer_ids,
                 staging_buffer=self.staging_buffer,
-                dst_slot_layer_ids=layout.staging_slot_layer_ids,
+                dst_slot_layer_ids=(
+                    target_info.staging.slot_layer_ids
+                    if target_info.staging is not None
+                    else None
+                ),
             )
         except Exception as e:
             raise RuntimeError(
                 f"[Staging] KV transfer via staging buffer failed: {e}. "
-                f"session={peer.name}"
+                f"session={session_id}"
             ) from e
 
 

@@ -843,7 +843,7 @@ class CommonKVManager(BaseKVManager):
         raise NotImplementedError
 
     def validate_aux_buffers(
-        self, num_dst_aux: int, dst_aux_item_lens: Optional[List[int]]
+        self, dst_aux_ptrs: List[int], dst_aux_item_lens: Optional[List[int]]
     ) -> None:
         if not self.exchange_aux_item_lens and dst_aux_item_lens is None:
             return
@@ -857,9 +857,9 @@ class CommonKVManager(BaseKVManager):
         if not (
             dst_aux_item_lens is not None
             and len(src_ptrs) == len(src_item_lens)
-            and num_dst_aux == len(dst_aux_item_lens)
-            and num_dst_aux in (required_buffers, required_buffers + 1)
-            and (num_dst_aux == required_buffers or dst_aux_item_lens[-1] == 64)
+            and len(dst_aux_ptrs) == len(dst_aux_item_lens)
+            and len(dst_aux_ptrs) in (required_buffers, required_buffers + 1)
+            and (len(dst_aux_ptrs) == required_buffers or dst_aux_item_lens[-1] == 64)
             and (
                 not self.customized_info_enabled
                 or (
@@ -872,7 +872,7 @@ class CommonKVManager(BaseKVManager):
             raise ValueError(
                 "Disaggregation metadata buffer layout mismatch: "
                 f"prefill has {len(src_ptrs)} buffers with item sizes {src_item_lens}, "
-                f"decode has {num_dst_aux} buffers with item sizes {dst_aux_item_lens}. "
+                f"decode has {len(dst_aux_ptrs)} buffers with item sizes {dst_aux_item_lens}. "
                 "Both servers must run a build that reports metadata buffer sizes, "
                 "with the same SGLANG_DISAGG_CUSTOMIZED_INFO_MAX_BYTES, a decode "
                 "--disaggregation-max-top-logprobs-num at least prefill's, and "
@@ -1356,11 +1356,6 @@ class CommonKVManager(BaseKVManager):
             )
             return 1
         return self._kv_replica_factor
-
-    def peer_requires_dcp_relayout(self, peer, info) -> bool:
-        """Whether a room's transfer to `peer`, its key in transfer_infos,
-        relayouts for DCP."""
-        return self.decode_kv_args_table[peer].requires_dcp_relayout
 
     def resolve_kv_replica_factor(self, transfer_infos: Dict) -> None:
         if not self.is_mla_backend:
@@ -2543,7 +2538,10 @@ class CommonKVSender(BaseKVSender):
         for peer, info in self.kv_mgr.transfer_infos.get(
             self.bootstrap_room, {}
         ).items():
-            if not info.is_dummy and self.kv_mgr.peer_requires_dcp_relayout(peer, info):
+            if (
+                not info.is_dummy
+                and self.kv_mgr.decode_kv_args_table[peer].requires_dcp_relayout
+            ):
                 return self.kv_mgr._dcp_pack_max_tokens
         return None
 
