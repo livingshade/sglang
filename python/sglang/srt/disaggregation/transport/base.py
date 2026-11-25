@@ -99,6 +99,12 @@ class Transport(ABC):
         buffers for write(), in the peer's export order."""
 
     @abstractmethod
+    def release_remote(self, remote: RemoteBuffers) -> None:
+        """Drop the state import_buffers() created for `remote`; later imports
+        of the same peer stay usable. The caller ensures no write to `remote`
+        can still access memory."""
+
+    @abstractmethod
     def write(
         self, remote: RemoteBuffers, src: BufferKey, dst: BufferKey, ranges: np.ndarray
     ) -> Handle:

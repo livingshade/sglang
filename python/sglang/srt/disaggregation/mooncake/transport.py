@@ -125,6 +125,9 @@ class MooncakeTransport(Transport):
             session_id=desc.session_id, bases=dict(zip(keys, desc.bases, strict=True))
         )
 
+    def release_remote(self, remote: MooncakeRemoteBuffers) -> None:
+        """Nothing to drop: import_buffers() leaves no engine state."""
+
     def write(
         self,
         remote: MooncakeRemoteBuffers,
