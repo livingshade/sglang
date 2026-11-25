@@ -15,7 +15,7 @@ from sglang.srt.disaggregation.mooncake.conn import (
     MooncakeKVManager,
     MooncakeKVReceiver,
     MooncakeKVSender,
-    Peer,
+    MooncakePeer,
     _DcpIndexK,
 )
 from sglang.srt.disaggregation.transport.base import Copy
@@ -274,7 +274,7 @@ class AscendKVManager(MooncakeKVManager):
 
     def send_kvcache(
         self,
-        peer: Peer,
+        peer: MooncakePeer,
         prefill_kv_indices: npt.NDArray[np.int32],
         dst_kv_ptrs: list[int],
         dst_kv_indices: npt.NDArray[np.int32],
@@ -408,7 +408,7 @@ class AscendKVManager(MooncakeKVManager):
 
     def send_kvcache_dcp(
         self,
-        peer: Peer,
+        peer: MooncakePeer,
         prefill_kv_indices: npt.NDArray[np.int32],
         dst_kv_ptrs: list[int],
         dst_kv_indices: npt.NDArray[np.int32],
