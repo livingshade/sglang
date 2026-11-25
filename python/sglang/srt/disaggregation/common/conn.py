@@ -843,7 +843,7 @@ class CommonKVManager(BaseKVManager):
         raise NotImplementedError
 
     def validate_aux_buffers(
-        self, dst_aux_ptrs: List[int], dst_aux_item_lens: Optional[List[int]]
+        self, num_dst_aux: int, dst_aux_item_lens: Optional[List[int]]
     ) -> None:
         if not self.exchange_aux_item_lens and dst_aux_item_lens is None:
             return
@@ -857,9 +857,9 @@ class CommonKVManager(BaseKVManager):
         if not (
             dst_aux_item_lens is not None
             and len(src_ptrs) == len(src_item_lens)
-            and len(dst_aux_ptrs) == len(dst_aux_item_lens)
-            and len(dst_aux_ptrs) in (required_buffers, required_buffers + 1)
-            and (len(dst_aux_ptrs) == required_buffers or dst_aux_item_lens[-1] == 64)
+            and num_dst_aux == len(dst_aux_item_lens)
+            and num_dst_aux in (required_buffers, required_buffers + 1)
+            and (num_dst_aux == required_buffers or dst_aux_item_lens[-1] == 64)
             and (
                 not self.customized_info_enabled
                 or (
@@ -872,7 +872,7 @@ class CommonKVManager(BaseKVManager):
             raise ValueError(
                 "Disaggregation metadata buffer layout mismatch: "
                 f"prefill has {len(src_ptrs)} buffers with item sizes {src_item_lens}, "
-                f"decode has {len(dst_aux_ptrs)} buffers with item sizes {dst_aux_item_lens}. "
+                f"decode has {num_dst_aux} buffers with item sizes {dst_aux_item_lens}. "
                 "Both servers must run a build that reports metadata buffer sizes, "
                 "with the same SGLANG_DISAGG_CUSTOMIZED_INFO_MAX_BYTES, a decode "
                 "--disaggregation-max-top-logprobs-num at least prefill's, and "

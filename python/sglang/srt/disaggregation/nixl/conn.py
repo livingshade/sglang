@@ -1824,7 +1824,7 @@ class NixlKVManager(StagingManagerMixin, CommonKVManager):
                     assert req.agent_name in self.decode_kv_args_table
                     dst_info = self.decode_kv_args_table[req.agent_name]
                     self.validate_aux_buffers(
-                        dst_info.dst_aux_ptrs, dst_info.dst_aux_item_lens
+                        len(dst_info.dst_aux_ptrs), dst_info.dst_aux_item_lens
                     )
                     if dst_info.unified_layout_error:
                         raise ValueError(dst_info.unified_layout_error)
@@ -2983,7 +2983,7 @@ class NixlKVManager(StagingManagerMixin, CommonKVManager):
         dst_aux_item_lens: Optional[List[int]],
         dst_aux_index: int,
     ):
-        self.validate_aux_buffers(dst_aux_ptrs, dst_aux_item_lens)
+        self.validate_aux_buffers(len(dst_aux_ptrs), dst_aux_item_lens)
         src_addrs = []
         dst_addrs = []
 

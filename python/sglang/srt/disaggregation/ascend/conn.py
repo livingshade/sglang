@@ -276,7 +276,6 @@ class AscendKVManager(MooncakeKVManager):
         self,
         peer: MooncakePeer,
         prefill_kv_indices: npt.NDArray[np.int32],
-        dst_kv_ptrs: list[int],
         dst_kv_indices: npt.NDArray[np.int32],
         executor: concurrent.futures.ThreadPoolExecutor,
         dst_layer_ids: Optional[List[int]] = None,
@@ -290,8 +289,9 @@ class AscendKVManager(MooncakeKVManager):
                 "Ascend PD transfer does not support HiSparse "
                 "destination device KV indices"
             )
+        num_dst_kv_entries = len(peer.keys.kv)
         self._validate_envelope_kv_layout(
-            dst_kv_ptrs, dst_kv_item_len, dst_attn_tp_size
+            num_dst_kv_entries, dst_kv_item_len, dst_attn_tp_size
         )
         # Hybrid MLA prefill stages expose PP-local entries, while a PP=1
         # decode peer registers all model layers. Pair only this layout by
@@ -315,7 +315,7 @@ class AscendKVManager(MooncakeKVManager):
         )
 
         src_entries = list(range(len(self.kv_args.kv_data_ptrs)))
-        dst_entries = list(range(len(dst_kv_ptrs)))
+        dst_entries = list(range(num_dst_kv_entries))
         # Layer-split prefill reports owned-only entries while
         # a non-split decode peer registers every layer; the entry-count
         # mismatch routes into the group-aware dst remap below, same slicing
@@ -410,7 +410,6 @@ class AscendKVManager(MooncakeKVManager):
         self,
         peer: MooncakePeer,
         prefill_kv_indices: npt.NDArray[np.int32],
-        dst_kv_ptrs: list[int],
         dst_kv_indices: npt.NDArray[np.int32],
         *,
         dcp_token_item_lens: List[int],
@@ -432,7 +431,6 @@ class AscendKVManager(MooncakeKVManager):
             return super().send_kvcache_dcp(
                 peer,
                 prefill_kv_indices,
-                dst_kv_ptrs,
                 dst_kv_indices,
                 dcp_token_item_lens=dcp_token_item_lens,
                 dst_dcp_size=dst_dcp_size,
@@ -456,13 +454,13 @@ class AscendKVManager(MooncakeKVManager):
                 self.kv_args.kv_layer_ids,
                 dst_layer_ids,
                 len(src_kv_ptrs),
-                len(dst_kv_ptrs),
+                len(peer.keys.kv),
             )
             if dst_kv_item_lens:
                 dst_kv_item_lens = [dst_kv_item_lens[j] for j in dst_entries]
         else:
             _, dst_entries, _ = self.get_mla_kv_ptrs_with_pp(
-                list(range(len(src_kv_ptrs))), list(range(len(dst_kv_ptrs)))
+                list(range(len(src_kv_ptrs))), list(range(len(peer.keys.kv)))
             )
             if dst_kv_item_lens:
                 _, dst_kv_item_lens, _ = self.get_mla_kv_ptrs_with_pp(
