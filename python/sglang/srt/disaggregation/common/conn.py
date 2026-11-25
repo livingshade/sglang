@@ -879,6 +879,45 @@ class CommonKVManager(BaseKVManager):
                 "compatible metadata buffers."
             )
 
+    def validate_aux_buffers_by_count(
+        self, num_dst_aux: int, dst_aux_item_lens: Optional[List[int]]
+    ) -> None:
+        """validate_aux_buffers for a backend keyed by Peer, which has the
+        decode's aux buffer count but not its addresses."""
+        if not self.exchange_aux_item_lens and dst_aux_item_lens is None:
+            return
+
+        src_ptrs = self.kv_args.aux_data_ptrs
+        src_item_lens = self.kv_args.aux_item_lens
+        required_buffers = len(src_ptrs) - int(
+            get_disagg().disaggregation_enable_kv_checksum
+        )
+        slots = MetadataBuffers.CUSTOMIZED_INFO_SLOTS
+        if not (
+            dst_aux_item_lens is not None
+            and len(src_ptrs) == len(src_item_lens)
+            and num_dst_aux == len(dst_aux_item_lens)
+            and num_dst_aux in (required_buffers, required_buffers + 1)
+            and (num_dst_aux == required_buffers or dst_aux_item_lens[-1] == 64)
+            and (
+                not self.customized_info_enabled
+                or (
+                    min(len(src_item_lens), len(dst_aux_item_lens)) >= slots.stop
+                    and src_item_lens[slots] == dst_aux_item_lens[slots]
+                )
+            )
+            and all(src <= dst for src, dst in zip(src_item_lens, dst_aux_item_lens))
+        ):
+            raise ValueError(
+                "Disaggregation metadata buffer layout mismatch: "
+                f"prefill has {len(src_ptrs)} buffers with item sizes {src_item_lens}, "
+                f"decode has {num_dst_aux} buffers with item sizes {dst_aux_item_lens}. "
+                "Both servers must run a build that reports metadata buffer sizes, "
+                "with the same SGLANG_DISAGG_CUSTOMIZED_INFO_MAX_BYTES, a decode "
+                "--disaggregation-max-top-logprobs-num at least prefill's, and "
+                "compatible metadata buffers."
+            )
+
     def update_status(self, bootstrap_room: int, status: KVPoll):
         current = self.request_status.get(bootstrap_room)
         if current is None:
@@ -2542,6 +2581,18 @@ class CommonKVSender(BaseKVSender):
                 not info.is_dummy
                 and self.kv_mgr.decode_kv_args_table[peer].requires_dcp_relayout
             ):
+                return self.kv_mgr._dcp_pack_max_tokens
+        return None
+
+    def get_max_transfer_tokens_by_peer(self) -> Optional[int]:
+        """get_max_transfer_tokens for a backend whose room table is keyed by
+        Peer."""
+        if self.kv_mgr._dcp_pack_max_tokens is None:
+            return None
+        for peer, info in self.kv_mgr.transfer_infos.get(
+            self.bootstrap_room, {}
+        ).items():
+            if not info.is_dummy and peer.requires_dcp_relayout:
                 return self.kv_mgr._dcp_pack_max_tokens
         return None
 

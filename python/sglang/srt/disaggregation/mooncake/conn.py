@@ -33,7 +33,7 @@ from sglang.srt.disaggregation.common.staging_handler import (
     PrefillStagingContext,
     StagingManagerMixin,
     StagingTransferInfo,
-    handle_staging_rsp,
+    handle_staging_rsp_by_peer,
     handle_watermark_msg,
 )
 from sglang.srt.disaggregation.common.utils import (
@@ -647,25 +647,12 @@ class MooncakeKVManager(StagingManagerMixin, CommonKVManager):
             queue.put(kv_chunk)
             return (-1, True)
 
-        layout = peer.layout
-        try:
-            ret = self.send_kvcache_staged(
-                peer,
-                kv_chunk.prefill_kv_indices,
-                c_offset,
-                layout.staging_total_size - c_offset,
-                layout.dst_tp_rank,
-                layout.dst_attn_tp_size,
-                layout.dst_kv_item_len,
-                layout.dst_kv_layer_ids,
-                staging_buffer=staging_strategy.staging_buffer,
-                dst_slot_layer_ids=layout.staging_slot_layer_ids,
-            )
-        except Exception as e:
-            raise RuntimeError(
-                f"[Staging] KV transfer via staging buffer failed: {e}. "
-                f"session={peer.name}"
-            ) from e
+        ret = staging_strategy.transfer_by_peer(
+            peer,
+            kv_chunk.prefill_kv_indices,
+            c_offset,
+            peer.layout.staging_total_size - c_offset,
+        )
         if ret == -1:
             # Doesn't fit the ring: fail this room (caller's ret != 0 path), do
             # not fall back to the slice path (leaks the decode-side allocation).
@@ -686,13 +673,6 @@ class MooncakeKVManager(StagingManagerMixin, CommonKVManager):
             )
         return (ret, False)
 
-    def _room_infos_by_session(self, room: int) -> Dict[str, TransferInfo]:
-        """A room's transfer infos keyed by session id, as the shared staging
-        messages name each decode."""
-        return {
-            peer.name: info for peer, info in self.transfer_infos.get(room, {}).items()
-        }
-
     def _prefetch_staging_reqs(self, room: int, upto_tokens: Optional[int] = None):
         if not self.enable_staging or self.kv_buffer_tensors is None:
             return
@@ -706,12 +686,12 @@ class MooncakeKVManager(StagingManagerMixin, CommonKVManager):
             return
 
         from sglang.srt.disaggregation.common.staging_handler import (
-            prefetch_staging_reqs,
+            prefetch_staging_reqs_by_peer,
         )
 
-        prefetch_staging_reqs(
+        prefetch_staging_reqs_by_peer(
             room,
-            {room: self._room_infos_by_session(room)},
+            self.transfer_infos,
             self.kv_buffer_tensors,
             get_schedule().chunked_prefill_size,
             self._staging_ctx.prefetch_requested,
@@ -969,14 +949,7 @@ class MooncakeKVManager(StagingManagerMixin, CommonKVManager):
         peer = self._import_peer(registration)
         kv_layout_mismatch = self._kv_layout_mismatch(peer)
         fully_checked, state_mismatch = self._validate_peer_state_layout(peer)
-        try:
-            self.validate_aux_buffers(
-                registration.dst_aux_ptrs, peer.layout.dst_aux_item_lens
-            )
-            aux_mismatch = None
-        except ValueError as exc:
-            aux_mismatch = str(exc)
-        mismatch = kv_layout_mismatch or state_mismatch or aux_mismatch
+        mismatch = kv_layout_mismatch or state_mismatch
         self.check_peer_aux_buffer_count(peer.name, len(peer.keys.aux))
         previous = self._peers.get(peer.name)
         self._peers[peer.name] = msgspec.structs.replace(
@@ -3162,6 +3135,16 @@ class MooncakeKVManager(StagingManagerMixin, CommonKVManager):
                                 break
 
                         target_rank_registration_info: PeerLayout = peer.layout
+                        try:
+                            self.validate_aux_buffers_by_count(
+                                len(peer.keys.aux),
+                                target_rank_registration_info.dst_aux_item_lens,
+                            )
+                        except ValueError as exc:
+                            self.conclude_failure(
+                                bootstrap_room=kv_chunk.room, failure_reason=str(exc)
+                            )
+                            break
                         is_dcp_transfer = peer.requires_dcp_relayout
                         chunked_dst_device_kv_indice = None
                         if is_dcp_transfer:
@@ -3536,11 +3519,7 @@ class MooncakeKVManager(StagingManagerMixin, CommonKVManager):
                     continue
                 # Staging: decode replies with allocated staging offset
                 if room == "STAGING_RSP":
-                    rsp_room = int(waiting_req_bytes[1].decode("ascii"))
-                    handle_staging_rsp(
-                        waiting_req_bytes,
-                        {rsp_room: self._room_infos_by_session(rsp_room)},
-                    )
+                    handle_staging_rsp_by_peer(waiting_req_bytes, self.transfer_infos)
                     continue
                 if self._handle_abort_notification(waiting_req_bytes):
                     continue
@@ -3875,14 +3854,7 @@ class MooncakeKVSender(CommonKVSender):
     supports_host_tensor_indices = True
 
     def get_max_transfer_tokens(self) -> Optional[int]:
-        if self.kv_mgr._dcp_pack_max_tokens is None:
-            return None
-        for peer, info in self.kv_mgr.transfer_infos.get(
-            self.bootstrap_room, {}
-        ).items():
-            if not info.is_dummy and peer.requires_dcp_relayout:
-                return self.kv_mgr._dcp_pack_max_tokens
-        return None
+        return self.get_max_transfer_tokens_by_peer()
 
     @mooncake_trace_func(MooncakeRequestStage.MOONCAKE_SEND)
     def send(

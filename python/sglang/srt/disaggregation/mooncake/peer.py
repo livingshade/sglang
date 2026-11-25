@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import struct
-from typing import List, Optional
+from typing import List
 
 import msgspec
 
@@ -94,11 +94,5 @@ class MooncakePeer(Peer, frozen=True, eq=False):
 
     remote: MooncakeRemoteBuffers
     keys: BufferKeys
-    # Per-entry token widths when the decode's DCP layout needs a relayout.
-    dcp_token_item_lens: Optional[List[int]]
     # Registration cleared the state strides; skip the per-transfer check.
     state_strides_validated: bool
-
-    @property
-    def requires_dcp_relayout(self) -> bool:
-        return self.dcp_token_item_lens is not None

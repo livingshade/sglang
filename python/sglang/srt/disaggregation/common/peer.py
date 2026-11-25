@@ -56,3 +56,9 @@ class Peer(msgspec.Struct, frozen=True, eq=False):
     # Layout-check result; only a re-registration lifts it.
     rejection: Optional[str]
     layout: PeerLayout
+    # Per-entry token widths when the decode's DCP layout needs a relayout.
+    dcp_token_item_lens: Optional[List[int]]
+
+    @property
+    def requires_dcp_relayout(self) -> bool:
+        return self.dcp_token_item_lens is not None
