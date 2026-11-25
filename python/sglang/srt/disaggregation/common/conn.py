@@ -1357,6 +1357,11 @@ class CommonKVManager(BaseKVManager):
             return 1
         return self._kv_replica_factor
 
+    def peer_requires_dcp_relayout(self, peer, info) -> bool:
+        """Whether a room's transfer to `peer`, its key in transfer_infos,
+        relayouts for DCP."""
+        return self.decode_kv_args_table[peer].requires_dcp_relayout
+
     def resolve_kv_replica_factor(self, transfer_infos: Dict) -> None:
         if not self.is_mla_backend:
             # Only MLA replicates its KV across decode ranks; non-MLA head slices are
@@ -2538,10 +2543,7 @@ class CommonKVSender(BaseKVSender):
         for peer, info in self.kv_mgr.transfer_infos.get(
             self.bootstrap_room, {}
         ).items():
-            if (
-                not info.is_dummy
-                and self.kv_mgr.decode_kv_args_table[peer].requires_dcp_relayout
-            ):
+            if not info.is_dummy and self.kv_mgr.peer_requires_dcp_relayout(peer, info):
                 return self.kv_mgr._dcp_pack_max_tokens
         return None
 

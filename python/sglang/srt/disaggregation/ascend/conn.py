@@ -15,6 +15,7 @@ from sglang.srt.disaggregation.mooncake.conn import (
     MooncakeKVManager,
     MooncakeKVReceiver,
     MooncakeKVSender,
+    Peer,
     _DcpIndexK,
 )
 from sglang.srt.disaggregation.transport.base import Copy
@@ -273,7 +274,7 @@ class AscendKVManager(MooncakeKVManager):
 
     def send_kvcache(
         self,
-        mooncake_session_id: str,
+        peer: Peer,
         prefill_kv_indices: npt.NDArray[np.int32],
         dst_kv_ptrs: list[int],
         dst_kv_indices: npt.NDArray[np.int32],
@@ -297,7 +298,7 @@ class AscendKVManager(MooncakeKVManager):
         # global layer id; every other Ascend layout keeps the legacy path.
         if self.is_hybrid_mla_backend and self.pp_size > 1:
             return self._send_kvcache_generic(
-                mooncake_session_id=mooncake_session_id,
+                peer=peer,
                 item_lens=self.kv_args.kv_item_lens,
                 prefill_data_indices=prefill_kv_indices,
                 dst_data_indices=dst_kv_indices,
@@ -305,7 +306,7 @@ class AscendKVManager(MooncakeKVManager):
                 src_layer_ids=self.kv_args.kv_layer_ids,
                 dst_layer_ids=dst_layer_ids,
                 src_keys=self._local_keys.kv,
-                dst_keys=self._peers[mooncake_session_id].keys.kv,
+                dst_keys=peer.keys.kv,
             )
 
         # Group by indices
@@ -366,7 +367,7 @@ class AscendKVManager(MooncakeKVManager):
 
         kv_units = group_units(prefill_kv_blocks, dst_kv_blocks)
         local_kv_keys = self._local_keys.kv
-        peer_kv_keys = self._peers[mooncake_session_id].keys.kv
+        peer_kv_keys = peer.keys.kv
 
         def make_layer_copy(src_entry: int, dst_entry: int, item_len: int) -> Copy:
             return Copy(
@@ -378,13 +379,13 @@ class AscendKVManager(MooncakeKVManager):
         # Worker function for processing a single layer
         def process_layer(src_entry: int, dst_entry: int, item_len: int) -> int:
             return self._transfer_copies(
-                mooncake_session_id, [make_layer_copy(src_entry, dst_entry, item_len)]
+                peer, [make_layer_copy(src_entry, dst_entry, item_len)]
             )
 
         # Worker function for processing all layers in a batch
         def process_layers(layers_params: List[Tuple[int, int, int]]) -> int:
             return self._transfer_copies(
-                mooncake_session_id,
+                peer,
                 [make_layer_copy(*params) for params in layers_params],
             )
 
@@ -407,7 +408,7 @@ class AscendKVManager(MooncakeKVManager):
 
     def send_kvcache_dcp(
         self,
-        mooncake_session_id: str,
+        peer: Peer,
         prefill_kv_indices: npt.NDArray[np.int32],
         dst_kv_ptrs: list[int],
         dst_kv_indices: npt.NDArray[np.int32],
@@ -429,7 +430,7 @@ class AscendKVManager(MooncakeKVManager):
     ) -> int:
         if not self._uses_page_interleaved_dcp():
             return super().send_kvcache_dcp(
-                mooncake_session_id,
+                peer,
                 prefill_kv_indices,
                 dst_kv_ptrs,
                 dst_kv_indices,
@@ -498,7 +499,7 @@ class AscendKVManager(MooncakeKVManager):
             num_kv_tokens=num_kv_tokens,
         )
 
-        peer_kv_keys = self._peers[mooncake_session_id].keys.kv
+        peer_kv_keys = peer.keys.kv
         copies: List[Copy] = []
         for entry in range(num_entries):
             # Dense MLA uses the target/draft boundary directly, as Mooncake does.
@@ -531,7 +532,7 @@ class AscendKVManager(MooncakeKVManager):
                 )
             )
 
-        return self._transfer_copies(mooncake_session_id, copies)
+        return self._transfer_copies(peer, copies)
 
     def _is_generic_kvcache_state_type(self, st) -> bool:
         # DSV4 per-pool components also use the page-indexed send path.

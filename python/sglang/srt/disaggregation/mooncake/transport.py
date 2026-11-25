@@ -149,9 +149,9 @@ class MooncakeTransport(Transport):
     def status(self, handle: MooncakeHandle) -> Result:
         return handle.result
 
-    def send_probe(self, session_id: str) -> int:
-        """Lifts the engine's blacklist of a failed session when it answers."""
-        return self._engine.send_probe(session_id)
+    def send_probe(self, remote: MooncakeRemoteBuffers) -> int:
+        """Lifts the engine's blacklist of a failed peer when it answers."""
+        return self._engine.send_probe(remote.session_id)
 
     def close(self) -> None:
         self.deregister(list(self._registrations))
