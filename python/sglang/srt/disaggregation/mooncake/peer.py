@@ -3,26 +3,58 @@
 from __future__ import annotations
 
 import struct
-from typing import List
+from typing import List, Tuple
 
 import msgspec
 
 from sglang.srt.disaggregation.common.peer import Peer, PeerLayout
-from sglang.srt.disaggregation.common.utils import unpack_int_lists
-from sglang.srt.disaggregation.mooncake.buffers import BufferKeys
-from sglang.srt.disaggregation.mooncake.transport import MooncakeRemoteBuffers
+from sglang.srt.disaggregation.common.utils import pack_int_lists, unpack_int_lists
+from sglang.srt.disaggregation.mooncake.buffers import (
+    PEER_STAGING_KEY,
+    BufferKeys,
+    MooncakeBufferKey,
+)
+from sglang.srt.disaggregation.mooncake.transport import (
+    MooncakeBufferExport,
+    MooncakeRemoteBuffers,
+)
+
+
+def export_frames(
+    export: MooncakeBufferExport, keys: BufferKeys
+) -> Tuple[bytes, bytes, bytes, bytes, bytes]:
+    """The registration frames that carry `export`, which covers `keys` in
+    flat() order and then the staging ring if any: the session id, the KV, aux
+    and state base addresses, and the staging ring's (empty without one)."""
+    num_keys = len(keys.flat())
+    kv, aux, state = keys.unflatten(export.bases[:num_keys])
+    staging = export.bases[num_keys:]
+    return (
+        export.session_id.encode("ascii"),
+        b"".join(struct.pack("Q", ptr) for ptr in kv),
+        b"".join(struct.pack("Q", ptr) for ptr in aux),
+        pack_int_lists(state, "Q"),
+        struct.pack("Q", staging[0]) if staging else b"",
+    )
 
 
 class KVArgsRegisterInfo(msgspec.Struct, frozen=True):
-    """A decode's registration message: what the transport imports, and the
-    PeerLayout the protocol plans transfers from."""
+    """A decode's registration message. Its frames interleave the transport's
+    export with the PeerLayout; only this codec and export_frames split them."""
 
-    mooncake_session_id: str
-    dst_kv_ptrs: List[int]
-    dst_aux_ptrs: List[int]
-    dst_state_data_ptrs: List[List[int]]  # parallel to state_types
-    staging_base_ptr: int
+    # The name the decode's room messages carry: its mooncake session id.
+    name: str
+    # The protocol's names for the decode's KV, aux and state buffers.
+    keys: BufferKeys
+    # Covers `keys` in flat() order, then the staging ring when has_staging.
+    export: MooncakeBufferExport
+    has_staging: bool
     layout: PeerLayout
+
+    @property
+    def import_keys(self) -> List[MooncakeBufferKey]:
+        """The names to import `export` under."""
+        return self.keys.flat() + ([PEER_STAGING_KEY] if self.has_staging else [])
 
     @classmethod
     def from_zmq(cls, msg: List[bytes]) -> KVArgsRegisterInfo:
@@ -75,16 +107,24 @@ class KVArgsRegisterInfo(msgspec.Struct, frozen=True):
                 else None
             ),
         )
+        ptrs = (
+            list(struct.unpack(f"{len(msg[4]) // 8}Q", msg[4])),
+            list(struct.unpack(f"{len(msg[5]) // 8}Q", msg[5])),
+            unpack_int_lists(msg[7], "Q"),
+        )
+        staging_base = (
+            struct.unpack("Q", msg[15])[0] if len(msg) > 15 and len(msg[15]) == 8 else 0
+        )
+        keys = BufferKeys.for_buffers(*ptrs)
+        bases = [ptr for _, ptr in keys.pair(*ptrs)]
+        if staging_base:
+            bases.append(staging_base)
+        session_id = msg[3].decode("ascii")
         return cls(
-            mooncake_session_id=msg[3].decode("ascii"),
-            dst_kv_ptrs=list(struct.unpack(f"{len(msg[4]) // 8}Q", msg[4])),
-            dst_aux_ptrs=list(struct.unpack(f"{len(msg[5]) // 8}Q", msg[5])),
-            dst_state_data_ptrs=unpack_int_lists(msg[7], "Q"),
-            staging_base_ptr=(
-                struct.unpack("Q", msg[15])[0]
-                if len(msg) > 15 and len(msg[15]) == 8
-                else 0
-            ),
+            name=session_id,
+            keys=keys,
+            export=MooncakeBufferExport(session_id=session_id, bases=bases),
+            has_staging=bool(staging_base),
             layout=layout,
         )
 

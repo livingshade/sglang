@@ -32,6 +32,11 @@ class RemoteBuffers:
     """Opaque peer registration passed to write(); compared by identity."""
 
 
+class BufferExport:
+    """Opaque description of registered buffers from export_buffers(); the
+    protocol carries it to the peer, which passes it to import_buffers()."""
+
+
 class Handle:
     """Opaque write result queried through status(); compared by identity."""
 
@@ -80,6 +85,18 @@ class Transport(ABC):
     def deregister(self, keys: Sequence[BufferKey]) -> None:
         """Unregister `keys`, preserving regions still used by other keys.
         Leave backing memory allocated and the Transport usable."""
+
+    @abstractmethod
+    def export_buffers(self, keys: Sequence[BufferKey]) -> BufferExport:
+        """Describe the buffers registered under `keys`, in that order, for a
+        peer to write into. Covers registrations made before the call."""
+
+    @abstractmethod
+    def import_buffers(
+        self, desc: BufferExport, keys: Sequence[BufferKey]
+    ) -> RemoteBuffers:
+        """Import a peer's export_buffers() result. `keys` names the peer's
+        buffers for write(), in the peer's export order."""
 
     @abstractmethod
     def write(

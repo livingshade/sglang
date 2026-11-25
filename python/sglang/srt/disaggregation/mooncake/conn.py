@@ -56,7 +56,11 @@ from sglang.srt.disaggregation.mooncake.buffers import (
     copy_ranges,
     group_units,
 )
-from sglang.srt.disaggregation.mooncake.peer import KVArgsRegisterInfo, MooncakePeer
+from sglang.srt.disaggregation.mooncake.peer import (
+    KVArgsRegisterInfo,
+    MooncakePeer,
+    export_frames,
+)
 from sglang.srt.disaggregation.mooncake.transport import (
     MooncakeTransport,
     Registration,
@@ -985,8 +989,7 @@ class MooncakeKVManager(StagingManagerMixin, CommonKVManager):
         )
 
     def _import_peer(self, registration: KVArgsRegisterInfo) -> MooncakePeer:
-        """Import a registration as a Peer not yet layout-checked. Its buffer
-        addresses go to the transport and nowhere else."""
+        """Import a registration as a Peer not yet layout-checked."""
         layout = registration.layout
         dcp_token_item_lens = None
         if self.requires_dcp_relayout(layout.dst_dcp_size, layout.dst_dcp_rank):
@@ -1001,25 +1004,14 @@ class MooncakeKVManager(StagingManagerMixin, CommonKVManager):
                 draft_rows_collapsed=layout.dst_draft_rows_dcp_collapsed,
             )
             self._init_dcp_pack_buffers_once(layout.dst_dcp_size, include_draft=True)
-        # Keys follow the registration message's field order, as on decode.
-        ptrs = (
-            registration.dst_kv_ptrs,
-            registration.dst_aux_ptrs,
-            registration.dst_state_data_ptrs,
-        )
-        keys = BufferKeys.for_buffers(*ptrs)
-        bases = dict(keys.pair(*ptrs))
-        if registration.staging_base_ptr:
-            bases[PEER_STAGING_KEY] = registration.staging_base_ptr
-        remote = self.transport.import_registration(
-            session_id=registration.mooncake_session_id, bases=bases
-        )
         return MooncakePeer(
-            name=registration.mooncake_session_id,
-            remote=remote,
+            name=registration.name,
+            remote=self.transport.import_buffers(
+                registration.export, registration.import_keys
+            ),
             rejection=None,
             layout=layout,
-            keys=keys,
+            keys=registration.keys,
             dcp_token_item_lens=dcp_token_item_lens,
             state_strides_validated=False,
         )
@@ -3745,14 +3737,20 @@ class MooncakeKVManager(StagingManagerMixin, CommonKVManager):
             self._run_one_probe_pass()
 
     def build_receiver_registration_message(self) -> List[bytes]:
-        session_id = self.get_session_id()
-        packed_kv_data_ptrs = b"".join(
-            struct.pack("Q", ptr) for ptr in self.kv_args.kv_data_ptrs
-        )
-        packed_aux_data_ptrs = b"".join(
-            struct.pack("Q", ptr) for ptr in self.kv_args.aux_data_ptrs
-        )
-        packed_state_data_ptrs = pack_int_lists(self.kv_args.state_data_ptrs, "Q")
+        export_keys = self._local_keys.flat()
+        if self.enable_staging and self._staging_ctx.allocator is not None:
+            _alloc = self._staging_ctx.allocator
+            export_keys.append(self._staging_keys[_alloc.get_base_ptr()])
+            staging_total_size_str = str(_alloc.get_total_size()).encode("ascii")
+        else:
+            staging_total_size_str = b""
+        (
+            session_id,
+            packed_kv_data_ptrs,
+            packed_aux_data_ptrs,
+            packed_state_data_ptrs,
+            packed_staging_base_ptr,
+        ) = export_frames(self.transport.export_buffers(export_keys), self._local_keys)
         packed_state_item_lens = pack_int_lists(self.kv_args.state_item_lens, "I")
         packed_state_dim_per_tensor = pack_int_lists(
             getattr(self.kv_args, "state_dim_per_tensor", []) or [], "I"
@@ -3771,13 +3769,6 @@ class MooncakeKVManager(StagingManagerMixin, CommonKVManager):
         dst_kv_item_len = str(kv_item_len).encode("ascii")
         dst_dcp_size = str(self.dcp_size).encode("ascii")
         dst_dcp_rank = str(self.dcp_rank).encode("ascii")
-        if self.enable_staging and self._staging_ctx.allocator is not None:
-            _alloc = self._staging_ctx.allocator
-            packed_staging_base_ptr = struct.pack("Q", _alloc.get_base_ptr())
-            staging_total_size_str = str(_alloc.get_total_size()).encode("ascii")
-        else:
-            packed_staging_base_ptr = b""
-            staging_total_size_str = b""
         staging_slots = getattr(self, "kv_buffer_tensors", None) or {}
         packed_staging_slot_layer_ids = b"".join(
             struct.pack("Q", layer_id)
@@ -3788,7 +3779,7 @@ class MooncakeKVManager(StagingManagerMixin, CommonKVManager):
             "None".encode("ascii"),
             self.local_ip.encode("ascii"),
             str(self.rank_port).encode("ascii"),
-            session_id.encode("ascii"),
+            session_id,
             packed_kv_data_ptrs,
             packed_aux_data_ptrs,
             # Always sent, empty unless exchange_aux_item_lens.
