@@ -211,5 +211,39 @@ class TestSpecKVLayoutBootstrap(CustomTestCase):
         self.assertEqual(route(server)[0], 503)
 
 
+class TestWireNegotiation(CustomTestCase):
+    def test_decode_picks_the_highest_common_wire_version(self):
+        cases = {
+            "prefill predates negotiation": ((0, 1), {}, 0),
+            "same range": ((0, 0), {"wire_versions": [0, 0]}, 0),
+            "highest common": ((0, 1), {"wire_versions": [0, 2]}, 1),
+            "no overlap": ((0, 0), {"wire_versions": [1, 1]}, "No common PD wire"),
+            "backend mismatch": (
+                (0, 0),
+                {"transfer_backend": "nixl"},
+                "Transfer backend mismatch",
+            ),
+        }
+        for name, (local, remote, expected) in cases.items():
+            with self.subTest(name):
+                manager = decode_manager({})
+                manager.transfer_backend = "mooncake"
+                manager.wire_versions = local
+                with patch(
+                    "sglang.srt.disaggregation.common.conn.requests.get",
+                    return_value=prefill_info(None, **remote),
+                ):
+                    if isinstance(expected, str):
+                        with self.assertRaisesRegex(RuntimeError, expected):
+                            manager.try_ensure_parallel_info("prefill:8998")
+                        self.assertEqual(manager.prefill_info_table, {})
+                    else:
+                        self.assertTrue(
+                            manager.try_ensure_parallel_info("prefill:8998")
+                        )
+                        info = manager.prefill_info_table["prefill:8998"]
+                        self.assertEqual(info.wire_version, expected)
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__]))
