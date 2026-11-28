@@ -43,8 +43,10 @@ from sglang.srt.disaggregation.common.bootstrap import (
     DeferredBootstrap,
 )
 from sglang.srt.disaggregation.common.wire import (
-    WireVersions,
-    negotiate_wire_version,
+    WIRE_VERSIONS,
+    VersionRange,
+    negotiate_version,
+    to_version_range,
 )
 from sglang.srt.disaggregation.mode import DisaggregationMode
 from sglang.srt.disaggregation.pp_consensus_store import PPConsensusStore
@@ -220,9 +222,10 @@ class PrefillServerInfo:
     # Each prefill shard-group rank owns a subset of logical KV pages.
     enable_kv_cache_sharding: bool = False
     stores_to_linker: bool = False
-    # None when the prefill predates wire negotiation.
+    # None when the prefill predates version negotiation.
     transfer_backend: Optional[str] = None
-    wire_versions: Optional[WireVersions] = None
+    wire_versions: Optional[VersionRange] = None
+    transport_versions: Optional[VersionRange] = None
 
     # PD true-retraction rebootstrap: the prefill's HTTP API port. The decode
     # already knows the prefill host (the bootstrap_addr host), so it can POST
@@ -238,6 +241,7 @@ class PrefillServerInfo:
     required_dst_info_num: Optional[int] = None
     required_prefill_response_num: Optional[int] = None
     wire_version: Optional[int] = None
+    transport_version: Optional[int] = None
 
     def __post_init__(self):
         self.attn_tp_size = int(self.attn_tp_size)
@@ -255,8 +259,9 @@ class PrefillServerInfo:
             int(self.prefill_http_port) if self.prefill_http_port is not None else None
         )
         if self.wire_versions is not None:
-            lowest, highest = self.wire_versions
-            self.wire_versions = (int(lowest), int(highest))
+            self.wire_versions = to_version_range(self.wire_versions)
+        if self.transport_versions is not None:
+            self.transport_versions = to_version_range(self.transport_versions)
 
 
 @dataclasses.dataclass
@@ -391,9 +396,9 @@ class SendRecord:
 
 
 class CommonKVManager(BaseKVManager):
-    # Inclusive (min, max) control-plane wire versions this transport speaks;
+    # Inclusive (min, max) header Trans Version this transport speaks;
     # a transport raises max once it gains a versioned codec.
-    wire_versions: WireVersions = (0, 0)
+    transport_versions: VersionRange = (0, 0)
     defer_decode_allocation: bool = False
     deferred_bootstrap: Optional[DeferredBootstrap] = None
     _staging_ctx = None
@@ -1633,8 +1638,13 @@ class CommonKVManager(BaseKVManager):
                 f"{self.transfer_backend}. Both servers must use the same "
                 f"--disaggregation-transfer-backend value."
             )
-        info.wire_version = negotiate_wire_version(
-            local=self.wire_versions, remote=info.wire_versions
+        info.wire_version = negotiate_version(
+            name="wire", local=WIRE_VERSIONS, remote=info.wire_versions
+        )
+        info.transport_version = negotiate_version(
+            name="transport",
+            local=self.transport_versions,
+            remote=info.transport_versions,
         )
 
         if info.page_size is not None and info.page_size != self.kv_args.page_size:
@@ -1937,7 +1947,8 @@ class CommonKVManager(BaseKVManager):
             "page_size": self.kv_args.page_size,
             "kv_cache_dtype": self.kv_cache_dtype_str,
             "transfer_backend": self.transfer_backend,
-            "wire_versions": list(self.wire_versions),
+            "wire_versions": list(WIRE_VERSIONS),
+            "transport_versions": list(self.transport_versions),
             "kv_layout": self.kv_layout,
             "dsv41_spec_layout": self.dsv41_spec_layout,
             "spec_kv_layout": self.spec_kv_layout or None,
@@ -3420,6 +3431,7 @@ class CommonKVBootstrapServer(BaseKVBootstrapServer):
         self.kv_cache_dtype: Optional[str] = None
         self.transfer_backend: Optional[str] = None
         self.wire_versions: Optional[list] = None
+        self.transport_versions: Optional[list] = None
         self.kv_layout: Optional[str] = None
         self.dsv41_spec_layout: Optional[dict] = None
         self.spec_kv_layout: Optional[dict] = None
@@ -3521,13 +3533,15 @@ class CommonKVBootstrapServer(BaseKVBootstrapServer):
         spec_kv_layout = data.get("spec_kv_layout")
         transfer_backend = data.get("transfer_backend")
         wire_versions = data.get("wire_versions")
+        transport_versions = data.get("transport_versions")
 
-        if self._registered_count and (self.transfer_backend, self.wire_versions) != (
-            transfer_backend,
-            wire_versions,
-        ):
+        if self._registered_count and (
+            self.transfer_backend,
+            self.wire_versions,
+            self.transport_versions,
+        ) != (transfer_backend, wire_versions, transport_versions):
             return web.Response(
-                text="Transfer backend or PD wire versions differ across prefill ranks",
+                text="Transfer backend or PD versions differ across prefill ranks",
                 status=400,
             )
         if self._registered_count and self.dsv41_spec_layout != dsv41_spec_layout:
@@ -3550,6 +3564,7 @@ class CommonKVBootstrapServer(BaseKVBootstrapServer):
             )
         self.transfer_backend = transfer_backend
         self.wire_versions = wire_versions
+        self.transport_versions = transport_versions
         self.dsv41_spec_layout = dsv41_spec_layout
         if self.spec_kv_layout is None:
             self.spec_kv_layout = spec_kv_layout
@@ -3668,6 +3683,7 @@ class CommonKVBootstrapServer(BaseKVBootstrapServer):
                 kv_cache_dtype=self.kv_cache_dtype,
                 transfer_backend=self.transfer_backend,
                 wire_versions=self.wire_versions,
+                transport_versions=self.transport_versions,
                 kv_layout=self.kv_layout,
                 dsv41_spec_layout=self.dsv41_spec_layout,
                 spec_kv_layout=self.spec_kv_layout,
@@ -3695,6 +3711,8 @@ class CommonKVBootstrapServer(BaseKVBootstrapServer):
                 payload.pop("transfer_backend")
             if info.wire_versions is None:
                 payload.pop("wire_versions")
+            if info.transport_versions is None:
+                payload.pop("transport_versions")
             # No state entries are stated as none, as a server that predates
             # them answers, so an older decode reads a dense prefill's answer.
             if not info.state_wire:

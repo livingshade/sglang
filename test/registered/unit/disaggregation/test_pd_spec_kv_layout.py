@@ -211,27 +211,55 @@ class TestSpecKVLayoutBootstrap(CustomTestCase):
         self.assertEqual(route(server)[0], 503)
 
 
-class TestWireNegotiation(CustomTestCase):
-    def test_decode_picks_the_highest_common_wire_version(self):
+class TestVersionNegotiation(CustomTestCase):
+    def test_decode_picks_the_highest_common_versions(self):
         cases = {
-            "prefill predates negotiation": ((0, 1), {}, 0),
-            "same range": ((0, 0), {"wire_versions": [0, 0]}, 0),
-            "highest common": ((0, 1), {"wire_versions": [0, 2]}, 1),
-            "no overlap": ((0, 0), {"wire_versions": [1, 1]}, "No common PD wire"),
+            "prefill predates negotiation": ((0, 1), (0, 1), {}, (0, 0)),
+            "same ranges": (
+                (0, 0),
+                (0, 0),
+                {"wire_versions": [0, 0], "transport_versions": [0, 0]},
+                (0, 0),
+            ),
+            "each range negotiated on its own": (
+                (0, 2),
+                (0, 1),
+                {"wire_versions": [0, 1], "transport_versions": [0, 3]},
+                (1, 1),
+            ),
+            "no common wire version": (
+                (0, 0),
+                (0, 0),
+                {"wire_versions": [1, 1]},
+                "No common PD wire version",
+            ),
+            "no common transport version": (
+                (0, 0),
+                (0, 0),
+                {"transport_versions": [1, 1]},
+                "No common PD transport version",
+            ),
             "backend mismatch": (
+                (0, 0),
                 (0, 0),
                 {"transfer_backend": "nixl"},
                 "Transfer backend mismatch",
             ),
         }
-        for name, (local, remote, expected) in cases.items():
+        for name, (local_wire, local_transport, remote, expected) in cases.items():
             with self.subTest(name):
                 manager = decode_manager({})
                 manager.transfer_backend = "mooncake"
-                manager.wire_versions = local
-                with patch(
-                    "sglang.srt.disaggregation.common.conn.requests.get",
-                    return_value=prefill_info(None, **remote),
+                manager.transport_versions = local_transport
+                with (
+                    patch(
+                        "sglang.srt.disaggregation.common.conn.requests.get",
+                        return_value=prefill_info(None, **remote),
+                    ),
+                    patch(
+                        "sglang.srt.disaggregation.common.conn.WIRE_VERSIONS",
+                        local_wire,
+                    ),
                 ):
                     if isinstance(expected, str):
                         with self.assertRaisesRegex(RuntimeError, expected):
@@ -242,7 +270,9 @@ class TestWireNegotiation(CustomTestCase):
                             manager.try_ensure_parallel_info("prefill:8998")
                         )
                         info = manager.prefill_info_table["prefill:8998"]
-                        self.assertEqual(info.wire_version, expected)
+                        self.assertEqual(
+                            (info.wire_version, info.transport_version), expected
+                        )
 
 
 if __name__ == "__main__":

@@ -1,33 +1,42 @@
-"""PD control-plane wire version negotiation.
+"""PD control-plane version negotiation.
 
-Each prefill rank advertises on ``PUT /route`` its transfer backend and the
-inclusive ``(min, max)`` range of control-plane wire versions that backend
-speaks. Decode reads both from ``GET /route`` and picks the highest common
-version before sending any ZMQ message. Version 0 is each backend's legacy
-positional frame format.
+Each prefill rank advertises on ``PUT /route`` its transfer backend and two
+inclusive ``(min, max)`` ranges: ``wire_versions`` for the shared header layout
+(the header's ``Ver``) and ``transport_versions`` for its transport's payloads
+(the header's ``Trans Version``). Decode reads them from ``GET /route`` and picks
+the highest common version of each before sending any ZMQ message. Version 0 of
+both is each backend's legacy positional frame format.
 """
 
 from __future__ import annotations
 
 from typing import Optional, Tuple
 
-WireVersions = Tuple[int, int]
+VersionRange = Tuple[int, int]
 
-# A prefill that predates negotiation omits wire_versions and speaks only legacy.
-PRE_NEGOTIATION_WIRE_VERSIONS: WireVersions = (0, 0)
+# Header layouts every transport speaks.
+WIRE_VERSIONS: VersionRange = (0, 0)
+
+# A prefill that predates negotiation omits both ranges and speaks only legacy.
+PRE_NEGOTIATION_VERSIONS: VersionRange = (0, 0)
 
 
-def negotiate_wire_version(
-    *, local: WireVersions, remote: Optional[WireVersions]
+def to_version_range(versions) -> VersionRange:
+    lowest, highest = versions
+    return int(lowest), int(highest)
+
+
+def negotiate_version(
+    *, name: str, local: VersionRange, remote: Optional[VersionRange]
 ) -> int:
-    """The highest wire version both ranges contain."""
+    """The highest version both ranges contain."""
     if remote is None:
-        remote = PRE_NEGOTIATION_WIRE_VERSIONS
+        remote = PRE_NEGOTIATION_VERSIONS
     lowest = max(local[0], remote[0])
     highest = min(local[1], remote[1])
     if lowest > highest:
         raise RuntimeError(
-            f"No common PD wire version: prefill speaks {list(remote)}, decode "
+            f"No common PD {name} version: prefill speaks {list(remote)}, decode "
             f"speaks {list(local)}. Upgrade the older server so both ranges overlap."
         )
     return highest
