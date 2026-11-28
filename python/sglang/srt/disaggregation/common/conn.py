@@ -42,6 +42,13 @@ from sglang.srt.disaggregation.common.bootstrap import (
     BootstrapNotification,
     DeferredBootstrap,
 )
+from sglang.srt.disaggregation.common.wire import (
+    LEGACY_VERSIONS,
+    SupportedVersions,
+    decode_route_versions,
+    encode_route_versions,
+    negotiate_versions,
+)
 from sglang.srt.disaggregation.mode import DisaggregationMode
 from sglang.srt.disaggregation.pp_consensus_store import PPConsensusStore
 from sglang.srt.disaggregation.utils import (
@@ -216,6 +223,11 @@ class PrefillServerInfo:
     # Each prefill shard-group rank owns a subset of logical KV pages.
     enable_kv_cache_sharding: bool = False
     stores_to_linker: bool = False
+    # None when the prefill predates version negotiation.
+    transfer_backend: Optional[str] = None
+    # Parallel lists: header Vers, and the [min, max] Trans Version under each.
+    wire_versions: Optional[List[int]] = None
+    transport_versions: Optional[List[List[int]]] = None
 
     # PD true-retraction rebootstrap: the prefill's HTTP API port. The decode
     # already knows the prefill host (the bootstrap_addr host), so it can POST
@@ -230,6 +242,8 @@ class PrefillServerInfo:
     target_pp_ranks: Optional[List[int]] = None
     required_dst_info_num: Optional[int] = None
     required_prefill_response_num: Optional[int] = None
+    wire_version: Optional[int] = None
+    transport_version: Optional[int] = None
 
     def __post_init__(self):
         self.attn_tp_size = int(self.attn_tp_size)
@@ -380,6 +394,9 @@ class SendRecord:
 
 
 class CommonKVManager(BaseKVManager):
+    # Header Ver -> inclusive (min, max) Trans Version this transport speaks
+    # under it; a transport adds Ver 1 once it gains a v1 codec.
+    supported_versions: SupportedVersions = LEGACY_VERSIONS
     defer_decode_allocation: bool = False
     deferred_bootstrap: Optional[DeferredBootstrap] = None
     _staging_ctx = None
@@ -439,6 +456,7 @@ class CommonKVManager(BaseKVManager):
             get_disagg().disaggregation_decode_enable_radix_cache
         )
         self.kv_cache_dtype_str = args.kv_cache_dtype_str
+        self.transfer_backend = get_disagg().disaggregation_transfer_backend
         self.kv_layout = args.kv_layout
         self.dsv41_spec_layout = get_dsv41_spec_layout(args)
         self.spec_kv_layout = get_spec_kv_layout(args)
@@ -1608,6 +1626,21 @@ class CommonKVManager(BaseKVManager):
             return False
 
         # Sanity checks
+        if (
+            info.transfer_backend is not None
+            and info.transfer_backend != self.transfer_backend
+        ):
+            raise RuntimeError(
+                f"Transfer backend mismatch: prefill server uses "
+                f"{info.transfer_backend}, but decode server uses "
+                f"{self.transfer_backend}. Both servers must use the same "
+                f"--disaggregation-transfer-backend value."
+            )
+        info.wire_version, info.transport_version = negotiate_versions(
+            local=self.supported_versions,
+            remote=decode_route_versions(info.wire_versions, info.transport_versions),
+        )
+
         if info.page_size is not None and info.page_size != self.kv_args.page_size:
             raise RuntimeError(
                 f"Page size mismatch: prefill server has page_size={info.page_size}, "
@@ -1907,6 +1940,7 @@ class CommonKVManager(BaseKVManager):
             "rank_port": self.rank_port,
             "page_size": self.kv_args.page_size,
             "kv_cache_dtype": self.kv_cache_dtype_str,
+            "transfer_backend": self.transfer_backend,
             "kv_layout": self.kv_layout,
             "dsv41_spec_layout": self.dsv41_spec_layout,
             "spec_kv_layout": self.spec_kv_layout or None,
@@ -1920,6 +1954,9 @@ class CommonKVManager(BaseKVManager):
             "prefill_http_port": get_serving().port,
         }
 
+        payload["wire_versions"], payload["transport_versions"] = encode_route_versions(
+            self.supported_versions
+        )
         payload["decode_allocation_policy"] = (
             get_disagg().disaggregation_decode_allocation_policy
         )
@@ -3387,6 +3424,9 @@ class CommonKVBootstrapServer(BaseKVBootstrapServer):
         self.dp_size = None
         self.page_size = None
         self.kv_cache_dtype: Optional[str] = None
+        self.transfer_backend: Optional[str] = None
+        self.wire_versions: Optional[list] = None
+        self.transport_versions: Optional[list] = None
         self.kv_layout: Optional[str] = None
         self.dsv41_spec_layout: Optional[dict] = None
         self.spec_kv_layout: Optional[dict] = None
@@ -3486,7 +3526,19 @@ class CommonKVBootstrapServer(BaseKVBootstrapServer):
         prefill_http_port = data.get("prefill_http_port")
         dsv41_spec_layout = data.get("dsv41_spec_layout")
         spec_kv_layout = data.get("spec_kv_layout")
+        transfer_backend = data.get("transfer_backend")
+        wire_versions = data.get("wire_versions")
+        transport_versions = data.get("transport_versions")
 
+        if self._registered_count and (
+            self.transfer_backend,
+            self.wire_versions,
+            self.transport_versions,
+        ) != (transfer_backend, wire_versions, transport_versions):
+            return web.Response(
+                text="Transfer backend or PD versions differ across prefill ranks",
+                status=400,
+            )
         if self._registered_count and self.dsv41_spec_layout != dsv41_spec_layout:
             return web.Response(
                 text="DeepSeek-V4.1 DSpark PD layout differs across prefill ranks",
@@ -3505,6 +3557,9 @@ class CommonKVBootstrapServer(BaseKVBootstrapServer):
             return web.Response(
                 text="Inconsistent prefill allocation policies", status=400
             )
+        self.transfer_backend = transfer_backend
+        self.wire_versions = wire_versions
+        self.transport_versions = transport_versions
         self.dsv41_spec_layout = dsv41_spec_layout
         if self.spec_kv_layout is None:
             self.spec_kv_layout = spec_kv_layout
@@ -3621,6 +3676,9 @@ class CommonKVBootstrapServer(BaseKVBootstrapServer):
                 pp_size=self.pp_size,
                 page_size=self.page_size,
                 kv_cache_dtype=self.kv_cache_dtype,
+                transfer_backend=self.transfer_backend,
+                wire_versions=self.wire_versions,
+                transport_versions=self.transport_versions,
                 kv_layout=self.kv_layout,
                 dsv41_spec_layout=self.dsv41_spec_layout,
                 spec_kv_layout=self.spec_kv_layout,
@@ -3644,6 +3702,12 @@ class CommonKVBootstrapServer(BaseKVBootstrapServer):
                 payload.pop("spec_kv_layout")
             if info.kv_layout is None:
                 payload.pop("kv_layout")
+            if info.transfer_backend is None:
+                payload.pop("transfer_backend")
+            if info.wire_versions is None:
+                payload.pop("wire_versions")
+            if info.transport_versions is None:
+                payload.pop("transport_versions")
             # No state entries are stated as none, as a server that predates
             # them answers, so an older decode reads a dense prefill's answer.
             if not info.state_wire:

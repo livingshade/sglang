@@ -211,5 +211,54 @@ class TestSpecKVLayoutBootstrap(CustomTestCase):
         self.assertEqual(route(server)[0], 503)
 
 
+class TestVersionNegotiation(CustomTestCase):
+    def test_decode_picks_the_highest_common_version_pair(self):
+        v0_v1 = {0: (0, 0), 1: (1, 2)}
+        cases = {
+            "prefill predates negotiation": (v0_v1, {}, (0, 0)),
+            "highest common Ver and Trans Version": (
+                v0_v1,
+                {"wire_versions": [0, 1], "transport_versions": [[0, 0], [1, 1]]},
+                (1, 1),
+            ),
+            "Ver whose transport ranges are disjoint is skipped": (
+                {0: (0, 0), 1: (2, 2)},
+                {"wire_versions": [0, 1], "transport_versions": [[0, 0], [1, 1]]},
+                (0, 0),
+            ),
+            "no common Ver": (
+                {1: (1, 1)},
+                {"wire_versions": [0], "transport_versions": [[0, 0]]},
+                "No common PD wire version",
+            ),
+            "backend mismatch": (
+                {0: (0, 0)},
+                {"transfer_backend": "nixl"},
+                "Transfer backend mismatch",
+            ),
+        }
+        for name, (local, remote, expected) in cases.items():
+            with self.subTest(name):
+                manager = decode_manager({})
+                manager.transfer_backend = "mooncake"
+                manager.supported_versions = local
+                with patch(
+                    "sglang.srt.disaggregation.common.conn.requests.get",
+                    return_value=prefill_info(None, **remote),
+                ):
+                    if isinstance(expected, str):
+                        with self.assertRaisesRegex(RuntimeError, expected):
+                            manager.try_ensure_parallel_info("prefill:8998")
+                        self.assertEqual(manager.prefill_info_table, {})
+                    else:
+                        self.assertTrue(
+                            manager.try_ensure_parallel_info("prefill:8998")
+                        )
+                        info = manager.prefill_info_table["prefill:8998"]
+                        self.assertEqual(
+                            (info.wire_version, info.transport_version), expected
+                        )
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__]))

@@ -40,6 +40,14 @@ struct PrefillServerInfo {
     pp_size: i64,
     page_size: Option<i64>,
     kv_cache_dtype: Option<String>,
+    /// Omitted, as a server that predates version negotiation answers, when
+    /// the prefill ranks did not register them.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    transfer_backend: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    wire_versions: Option<Vec<u16>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    transport_versions: Option<Vec<[u16; 2]>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     kv_layout: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -120,6 +128,11 @@ struct Topology {
     pp_size: Option<i64>,
     page_size: Option<i64>,
     kv_cache_dtype: Option<String>,
+    transfer_backend: Option<String>,
+    /// Header layout versions (the header's `Ver`) the ranks speak.
+    wire_versions: Option<Vec<u16>>,
+    /// Inclusive `[min, max]` `Trans Version` under each `wire_versions` entry.
+    transport_versions: Option<Vec<[u16; 2]>>,
     kv_layout: Option<String>,
     dsv41_spec_layout: Option<serde_json::Value>,
     spec_kv_layout: Option<serde_json::Value>,
@@ -218,6 +231,12 @@ struct Route {
     #[serde(default)]
     kv_cache_dtype: Option<String>,
     #[serde(default)]
+    transfer_backend: Option<String>,
+    #[serde(default)]
+    wire_versions: Option<Vec<u16>>,
+    #[serde(default)]
+    transport_versions: Option<Vec<[u16; 2]>>,
+    #[serde(default)]
     kv_layout: Option<String>,
     #[serde(default)]
     dsv41_spec_layout: Option<serde_json::Value>,
@@ -252,11 +271,16 @@ async fn route_put(State(state): State<Arc<Registry>>, Json(body): Json<Route>) 
 
     // Copy-on-write update. `rcu` may re-run the closure under write
     // contention, so it only reads `body` and clones what it stores.
+    let mut wire_mismatch = false;
     let mut layout_mismatch = false;
     let mut spec_mismatch = false;
     let mut state_wire_mismatch = false;
     state.topology.rcu(|current| {
         let mut topo = (**current).clone();
+        wire_mismatch = topo.registered_count > 0
+            && (topo.transfer_backend != body.transfer_backend
+                || topo.wire_versions != body.wire_versions
+                || topo.transport_versions != body.transport_versions);
         layout_mismatch =
             topo.registered_count > 0 && topo.dsv41_spec_layout != body.dsv41_spec_layout;
         spec_mismatch = topo.spec_kv_layout.is_some()
@@ -266,9 +290,12 @@ async fn route_put(State(state): State<Arc<Registry>>, Json(body): Json<Route>) 
             .state_wire_by_stage
             .get(&body.pp_rank)
             .is_some_and(|wire| *wire != body.state_wire);
-        if layout_mismatch || spec_mismatch || state_wire_mismatch {
+        if wire_mismatch || layout_mismatch || spec_mismatch || state_wire_mismatch {
             return topo;
         }
+        topo.transfer_backend = body.transfer_backend.clone();
+        topo.wire_versions = body.wire_versions.clone();
+        topo.transport_versions = body.transport_versions.clone();
         topo.dsv41_spec_layout = body.dsv41_spec_layout.clone();
         if topo.spec_kv_layout.is_none() {
             topo.spec_kv_layout = body.spec_kv_layout.clone();
@@ -310,6 +337,12 @@ async fn route_put(State(state): State<Arc<Registry>>, Json(body): Json<Route>) 
         topo
     });
 
+    if wire_mismatch {
+        return json_error(
+            StatusCode::BAD_REQUEST,
+            "Transfer backend or PD versions differ across prefill ranks",
+        );
+    }
     if layout_mismatch {
         return json_error(
             StatusCode::BAD_REQUEST,
@@ -383,6 +416,9 @@ async fn route_get(
             pp_size: topo.pp_size.unwrap(),
             page_size: topo.page_size,
             kv_cache_dtype: topo.kv_cache_dtype.clone(),
+            transfer_backend: topo.transfer_backend.clone(),
+            wire_versions: topo.wire_versions.clone(),
+            transport_versions: topo.transport_versions.clone(),
             kv_layout: topo.kv_layout.clone(),
             dsv41_spec_layout: topo.dsv41_spec_layout.clone(),
             spec_kv_layout: topo.spec_kv_layout.clone(),
@@ -536,6 +572,8 @@ mod tests {
             "system_dp_size": 1, "system_dp_rank": 0,
             "rank_ip": "10.0.0.1", "rank_port": 17000,
             "page_size": 64, "kv_cache_dtype": "auto",
+            "transfer_backend": "mooncake",
+            "wire_versions": [0], "transport_versions": [[0, 0]],
             "load_balance_method": "follow_bootstrap_room",
             "enable_dsa_cache_layer_split": false,
             "prefill_http_port": 30000,
@@ -632,6 +670,8 @@ mod tests {
             serde_json::json!({
                 "attn_tp_size": 1, "attn_cp_size": 1, "dp_size": 1, "pp_size": 1,
                 "page_size": 64, "kv_cache_dtype": "auto",
+                "transfer_backend": "mooncake",
+                "wire_versions": [0], "transport_versions": [[0, 0]],
                 "follow_bootstrap_room": true,
                 "enable_dsa_cache_layer_split": false,
                 "stores_to_linker": false,
