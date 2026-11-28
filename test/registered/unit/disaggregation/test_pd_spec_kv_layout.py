@@ -212,54 +212,39 @@ class TestSpecKVLayoutBootstrap(CustomTestCase):
 
 
 class TestVersionNegotiation(CustomTestCase):
-    def test_decode_picks_the_highest_common_versions(self):
+    def test_decode_picks_the_highest_common_version_pair(self):
+        v0_v1 = {0: (0, 0), 1: (1, 2)}
         cases = {
-            "prefill predates negotiation": ((0, 1), (0, 1), {}, (0, 0)),
-            "same ranges": (
-                (0, 0),
-                (0, 0),
-                {"wire_versions": [0, 0], "transport_versions": [0, 0]},
-                (0, 0),
-            ),
-            "each range negotiated on its own": (
-                (0, 2),
-                (0, 1),
-                {"wire_versions": [0, 1], "transport_versions": [0, 3]},
+            "prefill predates negotiation": (v0_v1, {}, (0, 0)),
+            "highest common Ver and Trans Version": (
+                v0_v1,
+                {"wire_versions": [0, 1], "transport_versions": [[0, 0], [1, 1]]},
                 (1, 1),
             ),
-            "no common wire version": (
+            "Ver whose transport ranges are disjoint is skipped": (
+                {0: (0, 0), 1: (2, 2)},
+                {"wire_versions": [0, 1], "transport_versions": [[0, 0], [1, 1]]},
                 (0, 0),
-                (0, 0),
-                {"wire_versions": [1, 1]},
+            ),
+            "no common Ver": (
+                {1: (1, 1)},
+                {"wire_versions": [0], "transport_versions": [[0, 0]]},
                 "No common PD wire version",
             ),
-            "no common transport version": (
-                (0, 0),
-                (0, 0),
-                {"transport_versions": [1, 1]},
-                "No common PD transport version",
-            ),
             "backend mismatch": (
-                (0, 0),
-                (0, 0),
+                {0: (0, 0)},
                 {"transfer_backend": "nixl"},
                 "Transfer backend mismatch",
             ),
         }
-        for name, (local_wire, local_transport, remote, expected) in cases.items():
+        for name, (local, remote, expected) in cases.items():
             with self.subTest(name):
                 manager = decode_manager({})
                 manager.transfer_backend = "mooncake"
-                manager.transport_versions = local_transport
-                with (
-                    patch(
-                        "sglang.srt.disaggregation.common.conn.requests.get",
-                        return_value=prefill_info(None, **remote),
-                    ),
-                    patch(
-                        "sglang.srt.disaggregation.common.conn.WIRE_VERSIONS",
-                        local_wire,
-                    ),
+                manager.supported_versions = local
+                with patch(
+                    "sglang.srt.disaggregation.common.conn.requests.get",
+                    return_value=prefill_info(None, **remote),
                 ):
                     if isinstance(expected, str):
                         with self.assertRaisesRegex(RuntimeError, expected):

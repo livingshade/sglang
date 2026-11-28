@@ -43,10 +43,11 @@ from sglang.srt.disaggregation.common.bootstrap import (
     DeferredBootstrap,
 )
 from sglang.srt.disaggregation.common.wire import (
-    WIRE_VERSIONS,
-    VersionRange,
-    negotiate_version,
-    to_version_range,
+    LEGACY_VERSIONS,
+    SupportedVersions,
+    decode_route_versions,
+    encode_route_versions,
+    negotiate_versions,
 )
 from sglang.srt.disaggregation.mode import DisaggregationMode
 from sglang.srt.disaggregation.pp_consensus_store import PPConsensusStore
@@ -224,8 +225,9 @@ class PrefillServerInfo:
     stores_to_linker: bool = False
     # None when the prefill predates version negotiation.
     transfer_backend: Optional[str] = None
-    wire_versions: Optional[VersionRange] = None
-    transport_versions: Optional[VersionRange] = None
+    # Parallel lists: header Vers, and the [min, max] Trans Version under each.
+    wire_versions: Optional[List[int]] = None
+    transport_versions: Optional[List[List[int]]] = None
 
     # PD true-retraction rebootstrap: the prefill's HTTP API port. The decode
     # already knows the prefill host (the bootstrap_addr host), so it can POST
@@ -258,10 +260,6 @@ class PrefillServerInfo:
         self.prefill_http_port = (
             int(self.prefill_http_port) if self.prefill_http_port is not None else None
         )
-        if self.wire_versions is not None:
-            self.wire_versions = to_version_range(self.wire_versions)
-        if self.transport_versions is not None:
-            self.transport_versions = to_version_range(self.transport_versions)
 
 
 @dataclasses.dataclass
@@ -396,9 +394,9 @@ class SendRecord:
 
 
 class CommonKVManager(BaseKVManager):
-    # Inclusive (min, max) header Trans Version this transport speaks;
-    # a transport raises max once it gains a versioned codec.
-    transport_versions: VersionRange = (0, 0)
+    # Header Ver -> inclusive (min, max) Trans Version this transport speaks
+    # under it; a transport adds Ver 1 once it gains a v1 codec.
+    supported_versions: SupportedVersions = LEGACY_VERSIONS
     defer_decode_allocation: bool = False
     deferred_bootstrap: Optional[DeferredBootstrap] = None
     _staging_ctx = None
@@ -1638,13 +1636,9 @@ class CommonKVManager(BaseKVManager):
                 f"{self.transfer_backend}. Both servers must use the same "
                 f"--disaggregation-transfer-backend value."
             )
-        info.wire_version = negotiate_version(
-            name="wire", local=WIRE_VERSIONS, remote=info.wire_versions
-        )
-        info.transport_version = negotiate_version(
-            name="transport",
-            local=self.transport_versions,
-            remote=info.transport_versions,
+        info.wire_version, info.transport_version = negotiate_versions(
+            local=self.supported_versions,
+            remote=decode_route_versions(info.wire_versions, info.transport_versions),
         )
 
         if info.page_size is not None and info.page_size != self.kv_args.page_size:
@@ -1947,8 +1941,6 @@ class CommonKVManager(BaseKVManager):
             "page_size": self.kv_args.page_size,
             "kv_cache_dtype": self.kv_cache_dtype_str,
             "transfer_backend": self.transfer_backend,
-            "wire_versions": list(WIRE_VERSIONS),
-            "transport_versions": list(self.transport_versions),
             "kv_layout": self.kv_layout,
             "dsv41_spec_layout": self.dsv41_spec_layout,
             "spec_kv_layout": self.spec_kv_layout or None,
@@ -1962,6 +1954,9 @@ class CommonKVManager(BaseKVManager):
             "prefill_http_port": get_serving().port,
         }
 
+        payload["wire_versions"], payload["transport_versions"] = encode_route_versions(
+            self.supported_versions
+        )
         payload["decode_allocation_policy"] = (
             get_disagg().disaggregation_decode_allocation_policy
         )
